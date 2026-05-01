@@ -31,7 +31,7 @@ const OPS = {
 const PREC = { "+": 1, "-": 1, "*": 2, "/": 2, "%": 2, "^": 4 };
 const RIGHT = { "^": true };
 
-function evalTokens(tokens, resolveRef, resolveGlobal) {
+function evalTokens(tokens, resolveRef, resolveGlobal, resolveTokenRef) {
   if (!tokens.length) return { value: null };
   const out = [];
   const ops = [];
@@ -41,6 +41,11 @@ function evalTokens(tokens, resolveRef, resolveGlobal) {
         out.push(t.value);
       } else if (t.kind === "ref") {
         const v = resolveRef(t.sourceId);
+        if (v === null || v === undefined || Number.isNaN(v))
+          return { value: null, error: "vínculo roto" };
+        out.push(v);
+      } else if (t.kind === "tokenref") {
+        const v = resolveTokenRef ? resolveTokenRef(t.lineId, t.tokenId) : null;
         if (v === null || v === undefined || Number.isNaN(v))
           return { value: null, error: "vínculo roto" };
         out.push(v);
@@ -339,6 +344,14 @@ function lineToFormula(line, results, name) {
     if (tok.kind === "ref") {
       const r = results[tok.sourceId];
       const val = r && r.value !== null && r.value !== undefined ? r.value : 0;
+      newTokens.push({ id: newId, kind: "num", value: val, raw: String(val) });
+    } else if (tok.kind === "tokenref") {
+      // Resolve token ref to literal — the target line context isn't preserved.
+      const srcLine = line.id === tok.lineId ? line : null;
+      // Note: only same-line refs would resolve here; cross-line tokenref needs
+      // access to all lines. Caller passes a `lines` array for this scenario.
+      const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
+      const val = srcTok && srcTok.kind === "num" ? srcTok.value : 0;
       newTokens.push({ id: newId, kind: "num", value: val, raw: String(val) });
     } else if (tok.kind === "globalref") {
       newTokens.push({ id: newId, kind: "globalref", globalId: tok.globalId });
@@ -1658,6 +1671,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
     if (t.kind === "op") return `op:${t.value}`;
     if (t.kind === "paren") return `paren:${t.value}`;
     if (t.kind === "ref") return `ref:${t.sourceId}`;
+    if (t.kind === "tokenref") return `tref:${t.lineId}:${t.tokenId}`;
     if (t.kind === "globalref") return `gref:${t.globalId}`;
     return "";
   })();
@@ -1727,11 +1741,28 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
       const r = evalTokens(
         line.tokens,
         (srcId) => resolveValue(srcId, seen),
-        resolveGlobalValue
+        resolveGlobalValue,
+        resolveTokenValue
       );
       return r.value;
     },
     [lines, resolveGlobalValue]
+  );
+
+  // Resolve tokenref: find the token in the given line and return its value.
+  // Only num tokens with a label are valid targets (internal variables); if the
+  // token has lost its label, the link is considered broken.
+  const resolveTokenValue = useCallback(
+    (lineId, tokenId) => {
+      const line = lines.find((l) => l.id === lineId);
+      if (!line) return null;
+      const tok = line.tokens.find((t) => t.id === tokenId);
+      if (!tok || tok.kind !== "num") return null;
+      const hasLabel = !!(line.labels && line.labels[tokenId]);
+      if (!hasLabel) return null; // label gone → link broken
+      return tok.value;
+    },
+    [lines]
   );
 
   const results = useMemo(() => {
@@ -1740,11 +1771,12 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
       r[line.id] = evalTokens(
         line.tokens,
         (srcId) => resolveValue(srcId),
-        resolveGlobalValue
+        resolveGlobalValue,
+        resolveTokenValue
       );
     }
     return r;
-  }, [lines, resolveValue, resolveGlobalValue]);
+  }, [lines, resolveValue, resolveGlobalValue, resolveTokenValue]);
 
   // measure chip positions for SVG lines
   useLayoutEffect(() => {
@@ -1873,7 +1905,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         const lf = finalizeBuilding(l);
         const last = lf.tokens[lf.tokens.length - 1];
         const newTok = { id: uid(), kind: "globalref", globalId };
-        if (last && (last.kind === "num" || last.kind === "ref" || last.kind === "globalref")) {
+        if (last && (last.kind === "num" || last.kind === "ref" || last.kind === "tokenref" || last.kind === "globalref")) {
           return { ...lf, tokens: [...lf.tokens, { id: uid(), kind: "op", value: "*" }, newTok] };
         }
         return { ...lf, tokens: [...lf.tokens, newTok] };
@@ -1896,7 +1928,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           sourceTokenId === "result"
             ? { id: uid(), kind: "ref", sourceId: sourceLineId }
             : { id: uid(), kind: "ref", sourceId: sourceLineId };
-        if (last && (last.kind === "num" || last.kind === "ref" || last.kind === "globalref")) {
+        if (last && (last.kind === "num" || last.kind === "ref" || last.kind === "tokenref" || last.kind === "globalref")) {
           return { ...lf, tokens: [...lf.tokens, { id: uid(), kind: "op", value: "*" }, newTok] };
         }
         return { ...lf, tokens: [...lf.tokens, newTok] };
@@ -1923,6 +1955,11 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
       const tok = line.tokens.find((t) => t.id === selection.target);
       if (tok?.kind === "num") currentValue = tok.value;
       else if (tok?.kind === "ref") currentValue = results[tok.sourceId]?.value;
+      else if (tok?.kind === "tokenref") {
+        const srcLine = lines.find((l) => l.id === tok.lineId);
+        const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
+        currentValue = srcTok && srcTok.kind === "num" ? srcTok.value : null;
+      }
     }
     if (currentValue === null || currentValue === undefined) return;
     const g = makeGlobal(labelText, currentValue);
@@ -2251,6 +2288,12 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           const v = results[tk.sourceId]?.value;
           return { id: uid(), kind: "num", value: (v === null || v === undefined || Number.isNaN(v)) ? 0 : v };
         }
+        if (tk.kind === "tokenref") {
+          const srcLine = lines.find((l) => l.id === tk.lineId);
+          const srcTok = srcLine?.tokens.find((t) => t.id === tk.tokenId);
+          const v = srcTok && srcTok.kind === "num" ? srcTok.value : null;
+          return { id: uid(), kind: "num", value: (v === null || v === undefined || Number.isNaN(v)) ? 0 : v };
+        }
         // Re-id to avoid collisions when pasting back into the same doc.
         return { ...tk, id: uid() };
       });
@@ -2278,6 +2321,14 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             const sourceLine = lines.find((l) => l.id === tk.sourceId);
             const lbl = sourceLine?.labels?.result || line.labels?.[tk.id];
             const v = results[tk.sourceId]?.value;
+            const valStr = v !== null && v !== undefined ? fmt(v) : "?";
+            return withLabel(valStr, lbl);
+          }
+          if (tk.kind === "tokenref") {
+            const sourceLine = lines.find((l) => l.id === tk.lineId);
+            const sourceTok = sourceLine?.tokens.find((t) => t.id === tk.tokenId);
+            const lbl = sourceLine?.labels?.[tk.tokenId] || line.labels?.[tk.id];
+            const v = sourceTok && sourceTok.kind === "num" ? sourceTok.value : null;
             const valStr = v !== null && v !== undefined ? fmt(v) : "?";
             return withLabel(valStr, lbl);
           }
@@ -2371,6 +2422,13 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         const srcLine = lines.find((l) => l.id === tok.sourceId);
         if (!displayLabel) displayLabel = srcLine?.labels?.result || null;
         setClipboard({ kind: "ref", sourceId: tok.sourceId });
+      } else if (tok.kind === "tokenref") {
+        const srcLine = lines.find((l) => l.id === tok.lineId);
+        const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
+        const v = srcTok && srcTok.kind === "num" ? srcTok.value : null;
+        if (v !== null && v !== undefined) displayValue = fmt(v);
+        if (!displayLabel) displayLabel = srcLine?.labels?.[tok.tokenId] || null;
+        setClipboard({ kind: "tokenref", lineId: tok.lineId, tokenId: tok.tokenId });
       } else if (tok.kind === "globalref") {
         const g = globals.find((x) => x.id === tok.globalId);
         if (g) {
@@ -2416,6 +2474,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
 
     let newTok;
     if (clipboard.kind === "ref") newTok = { id: uid(), kind: "ref", sourceId: clipboard.sourceId };
+    else if (clipboard.kind === "tokenref") newTok = { id: uid(), kind: "tokenref", lineId: clipboard.lineId, tokenId: clipboard.tokenId };
     else if (clipboard.kind === "globalref") newTok = { id: uid(), kind: "globalref", globalId: clipboard.globalId };
     else newTok = { id: uid(), kind: "num", value: clipboard.value, raw: String(clipboard.value) };
     mutateLines((prev) =>
@@ -2423,7 +2482,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         if (l.id !== activeLineId) return l;
         const lf = finalizeBuilding(l);
         const last = lf.tokens[lf.tokens.length - 1];
-        if (last && (last.kind === "num" || last.kind === "ref" || last.kind === "globalref")) {
+        if (last && (last.kind === "num" || last.kind === "ref" || last.kind === "tokenref" || last.kind === "globalref")) {
           return {
             ...lf,
             tokens: [...lf.tokens, { id: uid(), kind: "op", value: "*" }, newTok],
@@ -2522,20 +2581,36 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
       const line = lines.find((l) => l.id === lineId);
       const tok = line?.tokens.find((t) => t.id === target);
       if (!tok) return;
-      if (tok.kind === "num") tokenSpec = { kind: "num", value: tok.value };
+      if (tok.kind === "num") {
+        // If this num has a label (it's an internal variable), create a tokenref
+        // so the drop creates a live link instead of a literal copy.
+        const hasLabel = !!(line?.labels && line.labels[target]);
+        if (hasLabel) {
+          tokenSpec = { kind: "tokenref", lineId, tokenId: target };
+        } else {
+          tokenSpec = { kind: "num", value: tok.value };
+        }
+      }
       else if (tok.kind === "ref") tokenSpec = { kind: "ref", sourceId: tok.sourceId };
+      else if (tok.kind === "tokenref") tokenSpec = { kind: "tokenref", lineId: tok.lineId, tokenId: tok.tokenId };
       else if (tok.kind === "globalref") tokenSpec = { kind: "globalref", globalId: tok.globalId };
       else return;
     }
     const dragColor =
       tokenSpec.kind === "ref"
         ? getLineColor(lines, tokenSpec.sourceId, darkMode)
+        : tokenSpec.kind === "tokenref"
+        ? getLineColor(lines, tokenSpec.lineId, darkMode)
         : tokenSpec.kind === "globalref"
         ? (theme.accent || "#ADD010")
         : getLineColor(lines, lineId, darkMode);
     let dragText;
     if (tokenSpec.kind === "ref") {
       dragText = fmt(results[tokenSpec.sourceId]?.value);
+    } else if (tokenSpec.kind === "tokenref") {
+      const srcLine = lines.find((l) => l.id === tokenSpec.lineId);
+      const srcTok = srcLine?.tokens.find((t) => t.id === tokenSpec.tokenId);
+      dragText = srcTok ? fmt(srcTok.value) : "—";
     } else if (tokenSpec.kind === "globalref") {
       const g = globals.find((x) => x.id === tokenSpec.globalId);
       dragText = g ? fmt(g.value) : "—";
@@ -2574,6 +2649,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
     // Build the token to insert from the drag spec.
     const buildTok = () => {
       if (drag.token.kind === "ref") return { id: uid(), kind: "ref", sourceId: drag.token.sourceId };
+      if (drag.token.kind === "tokenref") return { id: uid(), kind: "tokenref", lineId: drag.token.lineId, tokenId: drag.token.tokenId };
       if (drag.token.kind === "globalref") return { id: uid(), kind: "globalref", globalId: drag.token.globalId };
       return { id: uid(), kind: "num", value: drag.token.value, raw: String(drag.token.value) };
     };
@@ -2586,7 +2662,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           if (l.id !== targetLineId) return l;
           const lf = finalizeBuilding(l);
           const last = lf.tokens[lf.tokens.length - 1];
-          if (last && (last.kind === "num" || last.kind === "ref" || last.kind === "globalref")) {
+          if (last && (last.kind === "num" || last.kind === "ref" || last.kind === "tokenref" || last.kind === "globalref")) {
             return {
               ...lf,
               tokens: [...lf.tokens, { id: uid(), kind: "op", value: "*" }, newTok],
@@ -2628,6 +2704,15 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             toKey: `${line.id}:${tok.id}`,
             id: `${line.id}-${tok.id}`,
             sourceLineId: tok.sourceId,
+            targetLineId: line.id,
+            targetTokenId: tok.id,
+          });
+        } else if (tok.kind === "tokenref") {
+          list.push({
+            fromKey: `${tok.lineId}:${tok.tokenId}`,
+            toKey: `${line.id}:${tok.id}`,
+            id: `${line.id}-${tok.id}`,
+            sourceLineId: tok.lineId,
             targetLineId: line.id,
             targetTokenId: tok.id,
           });
@@ -2891,6 +2976,15 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             commitEditNumber={commitEditNumber}
             chipRefs={chipRefs}
             refValueOf={(srcId) => results[srcId]?.value}
+            tokenRefValueOf={(srcLineId, srcTokenId) => {
+              const src = lines.find((l) => l.id === srcLineId);
+              if (!src) return null;
+              const tk = src.tokens.find((t) => t.id === srcTokenId);
+              if (!tk || tk.kind !== "num") return null;
+              const hasLabel = !!(src.labels && src.labels[srcTokenId]);
+              if (!hasLabel) return null; // link broken
+              return tk.value;
+            }}
             globalValueOf={(gid) => {
               const g = globals.find((x) => x.id === gid);
               return g ? g.value : null;
@@ -2902,6 +2996,10 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             refLabelOf={(srcId) => {
               const src = lines.find((l) => l.id === srcId);
               return src?.labels?.result || null;
+            }}
+            tokenRefLabelOf={(srcLineId, srcTokenId) => {
+              const src = lines.find((l) => l.id === srcLineId);
+              return src?.labels?.[srcTokenId] || null;
             }}
             colorOf={(srcId) => getLineColor(lines, srcId, darkMode)}
             lineColor={getLineColor(lines, line.id, darkMode)}
@@ -3080,6 +3178,10 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             const src = lines.find((l) => l.id === tok.sourceId);
             return src?.labels?.result || null;
           }
+          if (tok.kind === "tokenref") {
+            const src = lines.find((l) => l.id === tok.lineId);
+            return src?.labels?.[tok.tokenId] || null;
+          }
           if (tok.kind === "globalref") {
             const g = globals.find((x) => x.id === tok.globalId);
             return g?.name || null;
@@ -3098,6 +3200,11 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           if (!tok) return null;
           if (tok.kind === "num") return tok.value;
           if (tok.kind === "ref") return results[tok.sourceId]?.value;
+          if (tok.kind === "tokenref") {
+            const srcLine = lines.find((l) => l.id === tok.lineId);
+            const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
+            return srcTok && srcTok.kind === "num" ? srcTok.value : null;
+          }
           if (tok.kind === "globalref") {
             const g = globals.find((x) => x.id === tok.globalId);
             return g?.value;
@@ -3111,16 +3218,17 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           const line = lines.find((l) => l.id === s.lineId);
           const tok = line?.tokens.find((t) => t.id === s.target);
           if (tok?.kind === "ref") return getLineColor(lines, tok.sourceId, darkMode);
+          if (tok?.kind === "tokenref") return getLineColor(lines, tok.lineId, darkMode);
           if (tok?.kind === "globalref") return theme.accent || "#ADD010";
           return null;
         }}
         canBreakLink={(() => {
           if (!selection || selection.kind === "global") return false;
-          // Whole-line selection — only if line has at least one ref/globalref.
+          // Whole-line selection — only if line has at least one ref/tokenref/globalref.
           if (selection.kind === "line") {
             const line = lines.find((l) => l.id === selection.lineId);
             if (!line) return false;
-            return line.tokens.some((t) => t.kind === "ref" || t.kind === "globalref");
+            return line.tokens.some((t) => t.kind === "ref" || t.kind === "tokenref" || t.kind === "globalref");
           }
           const line = lines.find((l) => l.id === selection.lineId);
           if (!line) return false;
@@ -3129,12 +3237,12 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             return !!(line.labels && line.labels.result);
           }
           // Token chip:
-          //   - ref/globalref → always (resolve to literal)
+          //   - ref/tokenref/globalref → always (resolve to literal)
           //   - num with a label → enabled (label can be removed)
           //   - num without label → no
           const tok = line.tokens.find((t) => t.id === selection.target);
           if (!tok) return false;
-          if (tok.kind === "ref" || tok.kind === "globalref") return true;
+          if (tok.kind === "ref" || tok.kind === "tokenref" || tok.kind === "globalref") return true;
           if (tok.kind === "num") {
             return !!(line.labels && line.labels[selection.target]);
           }
@@ -3154,6 +3262,16 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
                 const newTokens = l.tokens.map((t) => {
                   if (t.kind === "ref") {
                     const v = results[t.sourceId]?.value;
+                    return {
+                      id: t.id,
+                      kind: "num",
+                      value: v === null || v === undefined || Number.isNaN(v) ? 0 : v,
+                    };
+                  }
+                  if (t.kind === "tokenref") {
+                    const srcLine = prev.find((l2) => l2.id === t.lineId);
+                    const srcTok = srcLine?.tokens.find((tk) => tk.id === t.tokenId);
+                    const v = srcTok && srcTok.kind === "num" ? srcTok.value : null;
                     return {
                       id: t.id,
                       kind: "num",
@@ -3206,10 +3324,14 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             );
             return;
           }
-          // ref / globalref → resolve to literal value (existing behavior).
+          // ref / tokenref / globalref → resolve to literal value.
           let newValue = null;
           if (tok.kind === "ref") {
             newValue = results[tok.sourceId]?.value;
+          } else if (tok.kind === "tokenref") {
+            const srcLine = lines.find((l) => l.id === tok.lineId);
+            const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
+            newValue = srcTok && srcTok.kind === "num" ? srcTok.value : null;
           } else if (tok.kind === "globalref") {
             const g = globals.find((x) => x.id === tok.globalId);
             newValue = g?.value;
@@ -3405,7 +3527,9 @@ function LineView({
   commitEditNumber,
   chipRefs,
   refValueOf,
+  tokenRefValueOf,
   refLabelOf,
+  tokenRefLabelOf,
   colorOf,
   lineColor,
   theme,
@@ -3482,12 +3606,14 @@ function LineView({
           </span>
         )}
         {line.tokens.map((tok) => {
-          const label = getLabelForToken(line, tok, refLabelOf, globalLabelOf);
+          const label = getLabelForToken(line, tok, refLabelOf, globalLabelOf, tokenRefLabelOf);
           // A ref token borrows the color of its source line.
           // A globalref uses the accent color (matches the chip).
           const tokColor =
             tok.kind === "ref"
               ? colorOf(tok.sourceId)
+              : tok.kind === "tokenref"
+              ? colorOf(tok.lineId)
               : tok.kind === "globalref"
               ? (theme?.accent || "#ADD010")
               : null;
@@ -3536,6 +3662,7 @@ function LineView({
                 commitEditNumber={commitEditNumber}
                 chipRefs={chipRefs}
                 refValueOf={refValueOf}
+                tokenRefValueOf={tokenRefValueOf}
                 refColor={tokColor}
                 theme={theme}
                 globalValueOf={globalValueOf}
@@ -3600,13 +3727,17 @@ function LineView({
   );
 }
 
-function getLabelForToken(line, tok, refLabelOf, globalLabelOf) {
+function getLabelForToken(line, tok, refLabelOf, globalLabelOf, tokenRefLabelOf) {
   // Explicit label on this token wins.
   const own = line.labels?.[tok.id];
   if (own) return own;
   // If this is a reference token, inherit the source line's result label.
   if (tok.kind === "ref") {
     return refLabelOf(tok.sourceId);
+  }
+  // Token reference → use the source token's label.
+  if (tok.kind === "tokenref" && tokenRefLabelOf) {
+    return tokenRefLabelOf(tok.lineId, tok.tokenId);
   }
   // Global ref → use the global's name as the label.
   if (tok.kind === "globalref" && globalLabelOf) {
@@ -3655,12 +3786,13 @@ function TokenView({
   commitEditNumber,
   chipRefs,
   refValueOf,
+  tokenRefValueOf,
   refColor,
   globalValueOf,
   theme,
 }) {
   const isSelected = selection && selection.lineId === lineId && selection.target === tok.id;
-  const isNumOrRef = tok.kind === "num" || tok.kind === "ref" || tok.kind === "globalref";
+  const isNumOrRef = tok.kind === "num" || tok.kind === "ref" || tok.kind === "globalref" || tok.kind === "tokenref";
   const [lifted, setLifted] = useState(false);
   const t = theme || {};
   const accent = t.accent || "#ADD010";
@@ -3763,6 +3895,33 @@ function TokenView({
   }
   if (tok.kind === "ref") {
     const v = refValueOf(tok.sourceId);
+    const c = refColor || "#7c3aed";
+    return (
+      <span
+        ref={setEl}
+        style={{
+          display: "inline-block",
+          padding: isSelected || lifted ? "2px 10px" : "2px 4px",
+          borderRadius: 10,
+          background: lifted ? c : isSelected ? c : "transparent",
+          color: lifted || isSelected ? "white" : c,
+          fontWeight: 400,
+          cursor: "grab",
+          boxShadow: lifted ? `0 8px 24px ${c}88` : isSelected ? `0 3px 10px ${c}66` : "none",
+          transition: "all 0.15s",
+          touchAction: "none",
+          WebkitUserSelect: "none",
+          userSelect: "none",
+          transform: lifted ? "scale(1.15)" : "scale(1)",
+          opacity: lifted ? 0.4 : 1,
+        }}
+      >
+        {v !== null && v !== undefined ? fmt(v) : "—"}
+      </span>
+    );
+  }
+  if (tok.kind === "tokenref") {
+    const v = tokenRefValueOf ? tokenRefValueOf(tok.lineId, tok.tokenId) : null;
     const c = refColor || "#7c3aed";
     return (
       <span
@@ -4525,6 +4684,12 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
           const lbl = sourceLine?.labels?.result || line.labels?.[tok.id];
           const valStr = fmt(results[tok.sourceId]?.value);
           parts.push(withLabel(valStr, lbl));
+        } else if (tok.kind === "tokenref") {
+          const sourceLine = lines.find((l) => l.id === tok.lineId);
+          const sourceTok = sourceLine?.tokens.find((t) => t.id === tok.tokenId);
+          const lbl = sourceLine?.labels?.[tok.tokenId] || line.labels?.[tok.id];
+          const v = sourceTok && sourceTok.kind === "num" ? sourceTok.value : null;
+          parts.push(withLabel(fmt(v), lbl));
         } else if (tok.kind === "globalref") {
           const g = globals.find((x) => x.id === tok.globalId);
           if (g) parts.push(withLabel(fmt(g.value), g.name));
@@ -4606,6 +4771,12 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
           const lbl = sourceLine?.labels?.result || line.labels?.[tok.id];
           const valStr = fmt(results[tok.sourceId]?.value);
           html += `<span class="chunk ref">${lbl ? `<span class="label">${escapeHtml(lbl)}</span>` : ""}${escapeHtml(valStr)}</span>`;
+        } else if (tok.kind === "tokenref") {
+          const sourceLine = lines.find((l) => l.id === tok.lineId);
+          const sourceTok = sourceLine?.tokens.find((t) => t.id === tok.tokenId);
+          const lbl = sourceLine?.labels?.[tok.tokenId] || line.labels?.[tok.id];
+          const v = sourceTok && sourceTok.kind === "num" ? sourceTok.value : null;
+          html += `<span class="chunk ref">${lbl ? `<span class="label">${escapeHtml(lbl)}</span>` : ""}${escapeHtml(fmt(v))}</span>`;
         } else if (tok.kind === "globalref") {
           const g = globals.find((x) => x.id === tok.globalId);
           if (g) {
@@ -4821,6 +4992,7 @@ function SettingsPopup({ settings, updateSetting, onClose, theme, darkMode }) {
           gridTemplateColumns: "1fr auto 1fr",
           alignItems: "center",
           padding: "14px 16px",
+          paddingTop: "calc(env(safe-area-inset-top) + 14px)",
           borderBottom: `1px solid ${sectionBorder}`,
         }}
       >
@@ -5191,6 +5363,11 @@ function getInternalVars(lines, results) {
           if (!tok) continue;
           if (tok.kind === "num") value = tok.value;
           else if (tok.kind === "ref") value = results[tok.sourceId]?.value;
+          else if (tok.kind === "tokenref") {
+            const srcLine = lines.find((l) => l.id === tok.lineId);
+            const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
+            value = srcTok && srcTok.kind === "num" ? srcTok.value : null;
+          }
           else if (tok.kind === "globalref") continue; // already a global
           else continue;
         }
@@ -6143,6 +6320,7 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
       <div
         style={{
           padding: "12px 16px",
+          paddingTop: "calc(env(safe-area-inset-top) + 12px)",
           borderBottom: `1px solid ${t.border}`,
           display: "flex",
           alignItems: "center",
