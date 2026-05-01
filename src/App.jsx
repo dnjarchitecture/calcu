@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, useLayoutEffect } from "react";
-import { Gear, Share, ArrowUUpLeft, Tag, Calculator as CalculatorIcon, Sun, Moon, Copy, ClipboardText, FileText, Files, Plus, X, FolderOpen, Trash, CaretLeft, Lock, Globe, MagnifyingGlass, Check, Eye, EyeSlash, PencilSimple, XSquare, Backspace } from "@phosphor-icons/react";
+import { Gear, Share, ArrowUUpLeft, Tag, Calculator as CalculatorIcon, Sun, Moon, Copy, ClipboardText, FileXls, Files, Plus, X, FolderOpen, Trash, CaretLeft, Lock, Globe, MagnifyingGlass, Check, Eye, EyeSlash, PencilSimple, XSquare, Backspace } from "@phosphor-icons/react";
 
 /**
  * CALCU — canvas calculator.
@@ -4737,6 +4737,8 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
   const isDark = !!darkMode;
   const accentOnWhite = isDark ? accent : "#778D1C";
   const [toast, setToast] = useState(null);
+  const [capturing, setCapturing] = useState(false);
+  const captureRef = useRef(null);
   const showToast = (msg) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
@@ -4813,81 +4815,277 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
     }
   };
 
-  // Open a printable HTML page in a new window. The user can then "Save as PDF"
-  // via the print dialog.
-  const handleExportPDF = () => {
-    const win = window.open("", "_blank");
-    if (!win) {
-      showToast("Permite ventanas emergentes");
-      return;
+  // Export the document as an .xlsx file with live formulas.
+  // - "Cálculo" sheet: one row per line. Column A = label/name, Column B = formula
+  //   (references to other lines become cell refs; globalrefs become defined-name refs),
+  //   Column C = computed result (Excel will recalculate when opened).
+  // - "Globales" sheet: lists every global used; their names become workbook-level
+  //   defined names so formulas in "Cálculo" can reference them by name.
+  const handleExportExcel = async () => {
+    try {
+      const lines = doc.lines || [];
+      if (!lines.some((l) => l.tokens && l.tokens.length > 0)) {
+        showToast("Nada que exportar");
+        return;
+      }
+      const XLSX = await import("xlsx");
+
+      // Sheet "Cálculo": rows start at index 1 (Excel row 2) because row 1 is headers.
+      // We need to know each line's row before building formulas (forward refs).
+      const headerRow = ["Etiqueta", "Fórmula", "Resultado"];
+      const lineRowByLineId = {};
+      lines.forEach((l, idx) => {
+        // +2 because: idx 0 is header (row 1), so first line is row 2.
+        lineRowByLineId[l.id] = idx + 2;
+      });
+
+      // Sanitize a global name into a valid Excel defined-name: must start with
+      // letter/underscore, only letters/digits/underscores, can't be a cell
+      // address. We replace invalid chars with _ and prefix with _ if needed.
+      const usedNames = new Set();
+      const globalNameMap = {}; // globalId → sanitized excel name
+      const sanitizeName = (raw) => {
+        let n = (raw || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        n = n.replace(/[^A-Za-z0-9_]/g, "_");
+        if (!n || /^[0-9]/.test(n)) n = "_" + n;
+        // Avoid clash with cell-like names (e.g. "A1", "BB12"). Suffix _ if so.
+        if (/^[A-Za-z]{1,3}[0-9]+$/.test(n)) n = n + "_";
+        // Dedupe.
+        let final = n;
+        let i = 2;
+        while (usedNames.has(final)) {
+          final = `${n}_${i++}`;
+        }
+        usedNames.add(final);
+        return final;
+      };
+      for (const g of globals) {
+        globalNameMap[g.id] = sanitizeName(g.name || "global");
+      }
+
+      // Build a single-cell formula string from a line's tokens.
+      // Returns null if the line is empty.
+      const buildFormula = (line) => {
+        if (!line.tokens || line.tokens.length === 0) return null;
+        const parts = [];
+        for (const tok of line.tokens) {
+          if (tok.kind === "num") {
+            parts.push(String(tok.value));
+          } else if (tok.kind === "op") {
+            parts.push(tok.value);
+          } else if (tok.kind === "paren") {
+            parts.push(tok.value);
+          } else if (tok.kind === "ref") {
+            // Reference to another line's result cell.
+            const r = lineRowByLineId[tok.sourceId];
+            if (r) parts.push(`$C$${r}`);
+            else {
+              // Source missing — fallback to literal value.
+              const v = results[tok.sourceId]?.value;
+              parts.push(String(v ?? 0));
+            }
+          } else if (tok.kind === "tokenref") {
+            // tokenref refers to a specific labeled num inside another line.
+            // Excel doesn't have per-token cells, so we use the token's literal
+            // value at export time.
+            const srcLine = lines.find((l) => l.id === tok.lineId);
+            const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
+            const v = srcTok && srcTok.kind === "num" ? srcTok.value : 0;
+            parts.push(String(v));
+          } else if (tok.kind === "globalref") {
+            const name = globalNameMap[tok.globalId];
+            if (name) parts.push(name);
+            else {
+              const g = globals.find((x) => x.id === tok.globalId);
+              parts.push(String(g?.value ?? 0));
+            }
+          }
+        }
+        return "=" + parts.join("");
+      };
+
+      // Build "Cálculo" sheet as array-of-arrays.
+      const calcRows = [headerRow];
+      const calcFormulas = []; // track which rows have formulas to set them via cell objects below
+      for (const line of lines) {
+        const label = (line.labels?.result || line.name || "").trim();
+        const formula = buildFormula(line);
+        const r = results[line.id];
+        const computed = r && r.value !== null && r.value !== undefined ? r.value : null;
+        calcRows.push([label, "", computed]);
+        calcFormulas.push(formula);
+      }
+      const wsCalc = XLSX.utils.aoa_to_sheet(calcRows);
+
+      // Apply formulas to column B (and let Excel recompute column C if we leave
+      // it pointing at the formula too — but we already wrote a precomputed value).
+      // For the formula column we use a cell object with `f` set; for the result
+      // column we ALSO write a formula `=B{n}` so it stays in sync if the user
+      // edits column B in Excel.
+      lines.forEach((line, idx) => {
+        const rowExcel = idx + 2;
+        const formula = calcFormulas[idx];
+        if (!formula) return;
+        // Column B (index 1)
+        const cellB = XLSX.utils.encode_cell({ r: rowExcel - 1, c: 1 });
+        wsCalc[cellB] = { t: "s", v: formula.slice(1), f: formula.slice(1) };
+        // Column C (index 2): formula referencing column B.
+        const cellC = XLSX.utils.encode_cell({ r: rowExcel - 1, c: 2 });
+        const r = results[line.id];
+        const computed = r && r.value !== null && r.value !== undefined ? r.value : 0;
+        // We use =B{row} so column C re-evaluates whenever B changes.
+        wsCalc[cellC] = { t: "n", v: computed, f: `B${rowExcel}` };
+      });
+
+      // Column widths
+      wsCalc["!cols"] = [
+        { wch: 22 }, // Etiqueta
+        { wch: 36 }, // Fórmula
+        { wch: 16 }, // Resultado
+      ];
+
+      // Build "Globales" sheet (only if any global is referenced or there are any).
+      const globalsUsedIds = new Set();
+      for (const line of lines) {
+        for (const tok of line.tokens) {
+          if (tok.kind === "globalref") globalsUsedIds.add(tok.globalId);
+        }
+      }
+      const numberGlobals = globals.filter((g) => g.kind !== "line");
+      const globalsToInclude = numberGlobals.filter((g) => globalsUsedIds.has(g.id));
+
+      const wb = XLSX.utils.book_new();
+      // Add "Globales" first so its rows exist when we create defined names for them.
+      let wsGlob = null;
+      if (globalsToInclude.length > 0) {
+        const globRows = [["Nombre", "Valor"]];
+        for (const g of globalsToInclude) {
+          globRows.push([g.name, g.value]);
+        }
+        wsGlob = XLSX.utils.aoa_to_sheet(globRows);
+        wsGlob["!cols"] = [{ wch: 22 }, { wch: 16 }];
+        XLSX.utils.book_append_sheet(wb, wsGlob, "Globales");
+      }
+
+      XLSX.utils.book_append_sheet(wb, wsCalc, "Cálculo");
+
+      // Defined names: each global → workbook-level name pointing at its value cell
+      // in the Globales sheet.
+      if (wsGlob && globalsToInclude.length > 0) {
+        wb.Workbook = wb.Workbook || {};
+        wb.Workbook.Names = wb.Workbook.Names || [];
+        globalsToInclude.forEach((g, idx) => {
+          const row = idx + 2; // +1 for header, +1 because rows are 1-indexed
+          const name = globalNameMap[g.id];
+          wb.Workbook.Names.push({
+            Name: name,
+            Ref: `Globales!$B$${row}`,
+          });
+        });
+      }
+
+      // Generate file as ArrayBuffer for sharing/downloading.
+      const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+      const blob = new Blob([wbout], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const safeName = (doc.name || "calcu").replace(/[^a-z0-9_\-]+/gi, "_").slice(0, 40) || "calcu";
+      const filename = `${safeName}.xlsx`;
+      const file = new File([blob], filename, { type: blob.type });
+
+      // Web Share API first.
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: doc.name || "CALCU",
+          });
+          return;
+        } catch (e) {
+          if (e && e.name === "AbortError") return;
+        }
+      }
+      // Fallback: download.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast("Excel descargado");
+    } catch (err) {
+      console.error("excel export error:", err);
+      showToast("No se pudo exportar");
     }
-    const lines = doc.lines || [];
-    let html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(doc.name || "CALCU")}</title>
-      <style>
-        @media print { @page { margin: 1.5cm; } }
-        body { font-family: 'Roboto Mono', ui-monospace, monospace; padding: 28px; max-width: 720px; color: #1a1a1a; }
-        h1 { font-size: 20px; font-weight: 500; color: ${accent}; margin: 0 0 24px; }
-        .line { padding: 14px 0; border-bottom: 1px solid #eee; font-size: 18px; line-height: 1.45; }
-        .label { font-size: 11px; color: #888; font-style: italic; display: block; margin-bottom: 2px; }
-        .chunk { display: inline-block; margin-right: 6px; vertical-align: top; }
-        .result { color: ${accent}; font-weight: 500; padding: 2px 8px; border: 1px solid ${accent}; border-radius: 8px; }
-        .ref { color: #7c3aed; font-weight: 500; }
-        .global { color: ${accent}; font-weight: 500; }
-        .op { color: #888; margin: 0 4px; }
-        .footer { margin-top: 40px; font-size: 11px; color: #aaa; text-align: center; }
-      </style>
-      </head><body>`;
-    html += `<h1>${escapeHtml(doc.name || "Sin título")}</h1>`;
-    for (const line of lines) {
-      html += `<div class="line">`;
-      for (const tok of line.tokens) {
-        if (tok.kind === "num") {
-          const lbl = line.labels?.[tok.id];
-          html += `<span class="chunk">${lbl ? `<span class="label">${escapeHtml(lbl)}</span>` : ""}${escapeHtml(fmt(tok.value))}</span>`;
-        } else if (tok.kind === "op") {
-          const opChar = tok.value === "*" ? "×" : tok.value === "/" ? "÷" : tok.value;
-          html += `<span class="op">${opChar}</span>`;
-        } else if (tok.kind === "paren") {
-          html += `<span>${tok.value}</span>`;
-        } else if (tok.kind === "ref") {
-          const sourceLine = lines.find((l) => l.id === tok.sourceId);
-          const lbl = sourceLine?.labels?.result || line.labels?.[tok.id];
-          const valStr = fmt(results[tok.sourceId]?.value);
-          html += `<span class="chunk ref">${lbl ? `<span class="label">${escapeHtml(lbl)}</span>` : ""}${escapeHtml(valStr)}</span>`;
-        } else if (tok.kind === "tokenref") {
-          const sourceLine = lines.find((l) => l.id === tok.lineId);
-          const sourceTok = sourceLine?.tokens.find((t) => t.id === tok.tokenId);
-          const lbl = sourceLine?.labels?.[tok.tokenId] || line.labels?.[tok.id];
-          const v = sourceTok && sourceTok.kind === "num" ? sourceTok.value : null;
-          html += `<span class="chunk ref">${lbl ? `<span class="label">${escapeHtml(lbl)}</span>` : ""}${escapeHtml(fmt(v))}</span>`;
-        } else if (tok.kind === "globalref") {
-          const g = globals.find((x) => x.id === tok.globalId);
-          if (g) {
-            html += `<span class="chunk global"><span class="label">${escapeHtml(g.name)}</span>${escapeHtml(fmt(g.value))}</span>`;
+  };
+
+  // Capture the clean view as a PNG. Renders a hidden offscreen div with the
+  // doc contents (no selection, no keypad), rasterizes it via html-to-image,
+  // then shares it (Web Share API) or downloads as fallback.
+  const handleScreenshot = async () => {
+    // Show the hidden capture node first.
+    setCapturing(true);
+    // Wait two frames for the DOM to mount and fonts to settle.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    try {
+      // Wait for fonts so the captured image uses Roboto Mono and not a fallback.
+      if (document.fonts && document.fonts.ready) {
+        try { await document.fonts.ready; } catch (e) {}
+      }
+      const node = captureRef.current;
+      if (!node) {
+        showToast("No se pudo capturar");
+        setCapturing(false);
+        return;
+      }
+      const mod = await import("html-to-image");
+      const dataUrl = await mod.toPng(node, {
+        pixelRatio: 2,
+        backgroundColor: isDark ? "#0f1115" : "#ffffff",
+        cacheBust: true,
+      });
+      // Convert dataUrl → Blob → File for sharing.
+      const res = await fetch(dataUrl);
+      const blob = await res.blob();
+      const safeName = (doc.name || "calcu").replace(/[^a-z0-9_\-]+/gi, "_").slice(0, 40) || "calcu";
+      const filename = `${safeName}.png`;
+      const file = new File([blob], filename, { type: "image/png" });
+
+      // Try Web Share API first (iOS Safari, Android Chrome).
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: doc.name || "CALCU",
+          });
+          setCapturing(false);
+          return;
+        } catch (e) {
+          // User cancelled or share failed → fall through to download.
+          if (e && e.name === "AbortError") {
+            setCapturing(false);
+            return;
           }
         }
       }
-      const r = results[line.id];
-      if (r && r.value !== null && r.value !== undefined) {
-        const resLabel = line.labels?.result;
-        html += `<span class="op">=</span>`;
-        html += `<span class="chunk"><span class="result">${resLabel ? `<span class="label">${escapeHtml(resLabel)}</span>` : ""}${escapeHtml(fmt(r.value))}</span></span>`;
-      }
-      html += `</div>`;
+      // Fallback: trigger a download.
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast("Imagen descargada");
+    } catch (err) {
+      console.error("screenshot error:", err);
+      showToast("No se pudo generar la imagen");
+    } finally {
+      setCapturing(false);
     }
-    html += `<div class="footer">CALCU · ${new Date().toLocaleDateString("es-ES")}</div>`;
-    html += `<script>setTimeout(() => window.print(), 400);</script>`;
-    html += `</body></html>`;
-    win.document.write(html);
-    win.document.close();
-  };
-
-  // Capture the canvas as PNG by rasterizing our DOM. We don't have html2canvas,
-  // so instead we open a clean HTML preview and instruct the user how to save.
-  // Simpler: use the same printable HTML but tell the user to take a screenshot.
-  const handleScreenshot = () => {
-    handleExportPDF(); // re-uses the print preview; user can choose image export there
-    showToast("Usa la opción 'Guardar como imagen' del cuadro de impresión");
   };
 
   return (
@@ -4946,12 +5144,12 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
           Compartir “{doc.name || "Sin título"}”
         </div>
 
-        <ShareBtn onClick={handleExportPDF} theme={t} accent={accent}>
-          <FileText size={18} weight="bold" style={{ color: accent }} />
+        <ShareBtn onClick={handleExportExcel} theme={t} accent={accent}>
+          <FileXls size={18} weight="bold" style={{ color: accent }} />
           <div>
-            <div style={{ fontSize: 14, fontWeight: 500 }}>Exportar como PDF</div>
+            <div style={{ fontSize: 14, fontWeight: 500 }}>Exportar como Excel</div>
             <div style={{ fontSize: 11, color: t.textMuted || "#888", marginTop: 2 }}>
-              Abre el cuadro de impresión para guardar como PDF
+              Archivo .xlsx con fórmulas vivas
             </div>
           </div>
         </ShareBtn>
@@ -4999,9 +5197,210 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
           </div>
         )}
       </div>
+      {capturing && (
+        <CaptureView
+          ref={captureRef}
+          doc={doc}
+          results={results}
+          globals={globals}
+          theme={t}
+          isDark={isDark}
+          accent={accent}
+        />
+      )}
     </div>
   );
 }
+
+// Hidden offscreen rendering used for screenshot capture. Positioned far off
+// the viewport so it doesn't affect layout but is fully painted (necessary
+// for html-to-image to rasterize).
+const CaptureView = React.forwardRef(function CaptureView(
+  { doc, results, globals, theme, isDark, accent },
+  ref
+) {
+  const t = theme || {};
+  const bg = isDark ? "#0f1115" : "#ffffff";
+  const text = isDark ? "#e8ecf3" : "#1a1a1a";
+  const muted = isDark ? "#7a8090" : "#888";
+  const equals = isDark ? "#555a68" : "#aaa";
+  const opText = isDark ? "#8f95a3" : "#666";
+  const accentOnWhite = isDark ? "#ADD010" : "#778D1C";
+  const lines = doc.lines || [];
+  const palette = isDark ? LINE_COLORS_DARK : LINE_COLORS_LIGHT;
+  const lineColor = (lineId) => {
+    const idx = lines.findIndex((l) => l.id === lineId);
+    return palette[(idx < 0 ? 0 : idx) % palette.length];
+  };
+  // Render a token as inline JSX with its label above (if any), styled to
+  // mirror the canvas appearance closely.
+  const renderToken = (tok, line) => {
+    if (tok.kind === "op") {
+      const display = tok.value === "*" ? "×" : tok.value === "/" ? "÷" : tok.value === "-" ? "−" : tok.value;
+      return <span style={{ color: opText, padding: "0 4px" }}>{display}</span>;
+    }
+    if (tok.kind === "paren") return <span style={{ color: opText }}>{tok.value}</span>;
+    let label = line.labels?.[tok.id] || null;
+    let value = null;
+    let color = text;
+    let bordered = false;
+    if (tok.kind === "num") {
+      value = fmt(tok.value);
+    } else if (tok.kind === "ref") {
+      const v = results[tok.sourceId]?.value;
+      value = v !== null && v !== undefined ? fmt(v) : "—";
+      color = lineColor(tok.sourceId);
+      if (!label) {
+        const src = lines.find((l) => l.id === tok.sourceId);
+        label = src?.labels?.result || null;
+      }
+    } else if (tok.kind === "tokenref") {
+      const srcLine = lines.find((l) => l.id === tok.lineId);
+      const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
+      const v = srcTok && srcTok.kind === "num" ? srcTok.value : null;
+      value = v !== null && v !== undefined ? fmt(v) : "—";
+      color = lineColor(tok.lineId);
+      if (!label) label = srcLine?.labels?.[tok.tokenId] || null;
+    } else if (tok.kind === "globalref") {
+      const g = globals.find((x) => x.id === tok.globalId);
+      value = g ? fmt(g.value) : "—";
+      color = accent;
+      if (!label) label = g?.name || null;
+    }
+    return (
+      <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center" }}>
+        {label && (
+          <span
+            style={{
+              fontSize: 11,
+              color: color,
+              fontStyle: "italic",
+              fontWeight: 400,
+              opacity: 0.9,
+              lineHeight: 1,
+              marginBottom: 1,
+            }}
+          >
+            {label}
+          </span>
+        )}
+        <span style={{ color, fontWeight: 400, padding: "2px 4px" }}>{value}</span>
+      </span>
+    );
+  };
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: "fixed",
+        left: -9999,
+        top: 0,
+        width: 720,
+        background: bg,
+        padding: "32px 36px",
+        fontFamily: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        color: text,
+        boxSizing: "border-box",
+      }}
+    >
+      <div
+        style={{
+          fontSize: 22,
+          fontWeight: 500,
+          color: accentOnWhite,
+          marginBottom: 20,
+          letterSpacing: "0.01em",
+        }}
+      >
+        {doc.name || "Sin título"}
+      </div>
+      {lines.map((line) => {
+        const r = results[line.id];
+        const hasResult = r && r.value !== null && r.value !== undefined;
+        const lc = lineColor(line.id);
+        return (
+          <div
+            key={line.id}
+            style={{
+              padding: "12px 0 10px",
+              borderBottom: `1px solid ${isDark ? "#222630" : "#eee"}`,
+              fontSize: 26,
+              fontWeight: 300,
+              lineHeight: 1.4,
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            {line.name && line.name.trim() && (
+              <div
+                style={{
+                  width: "100%",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  color: lc,
+                  marginBottom: 2,
+                  letterSpacing: "0.02em",
+                }}
+              >
+                {line.name}
+              </div>
+            )}
+            {line.tokens.map((tok) => (
+              <React.Fragment key={tok.id}>{renderToken(tok, line)}</React.Fragment>
+            ))}
+            {hasResult && line.tokens.length > 0 && (
+              <>
+                <span style={{ color: equals, margin: "0 4px" }}>=</span>
+                <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center" }}>
+                  {line.labels?.result && (
+                    <span
+                      style={{
+                        fontSize: 11,
+                        color: lc,
+                        fontStyle: "italic",
+                        fontWeight: 400,
+                        opacity: 0.9,
+                        lineHeight: 1,
+                        marginBottom: 1,
+                      }}
+                    >
+                      {line.labels.result}
+                    </span>
+                  )}
+                  <span
+                    style={{
+                      display: "inline-block",
+                      padding: "3px 14px",
+                      borderRadius: 12,
+                      border: `1.5px solid ${lc}`,
+                      color: lc,
+                      fontWeight: 400,
+                    }}
+                  >
+                    {fmt(r.value)}
+                  </span>
+                </span>
+              </>
+            )}
+          </div>
+        );
+      })}
+      <div
+        style={{
+          marginTop: 24,
+          fontSize: 11,
+          color: muted,
+          textAlign: "center",
+          letterSpacing: "0.06em",
+        }}
+      >
+        CALCU · {new Date().toLocaleDateString("es-ES")}
+      </div>
+    </div>
+  );
+});
 
 function ShareBtn({ children, onClick, theme, accent }) {
   const t = theme || {};
