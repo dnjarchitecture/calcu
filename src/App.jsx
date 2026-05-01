@@ -4815,12 +4815,14 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
     }
   };
 
-  // Export the document as an .xlsx file with live formulas.
-  // - "Cálculo" sheet: one row per line. Column A = label/name, Column B = formula
-  //   (references to other lines become cell refs; globalrefs become defined-name refs),
-  //   Column C = computed result (Excel will recalculate when opened).
-  // - "Globales" sheet: lists every global used; their names become workbook-level
-  //   defined names so formulas in "Cálculo" can reference them by name.
+  // Export the document as an .xlsx file with the following layout per line:
+  //   Row 1: line name (merged across the whole row of cells used)
+  //   Row 2: per-token labels (variable names, in italics)
+  //   Row 3: per-token values; operators in their own cells; result is a live
+  //          Excel formula referencing the value cells of this same line.
+  //   Row 4: empty separator.
+  // No separate "Globales" sheet; globalref/ref/tokenref values are written
+  // inline as numbers, with their label going in the row-2 label cell.
   const handleExportExcel = async () => {
     try {
       const lines = doc.lines || [];
@@ -4830,161 +4832,192 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
       }
       const XLSX = await import("xlsx");
 
-      // Sheet "Cálculo": rows start at index 1 (Excel row 2) because row 1 is headers.
-      // We need to know each line's row before building formulas (forward refs).
-      const headerRow = ["Etiqueta", "Fórmula", "Resultado"];
-      const lineRowByLineId = {};
-      lines.forEach((l, idx) => {
-        // +2 because: idx 0 is header (row 1), so first line is row 2.
-        lineRowByLineId[l.id] = idx + 2;
-      });
-
-      // Sanitize a global name into a valid Excel defined-name: must start with
-      // letter/underscore, only letters/digits/underscores, can't be a cell
-      // address. We replace invalid chars with _ and prefix with _ if needed.
-      const usedNames = new Set();
-      const globalNameMap = {}; // globalId → sanitized excel name
-      const sanitizeName = (raw) => {
-        let n = (raw || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-        n = n.replace(/[^A-Za-z0-9_]/g, "_");
-        if (!n || /^[0-9]/.test(n)) n = "_" + n;
-        // Avoid clash with cell-like names (e.g. "A1", "BB12"). Suffix _ if so.
-        if (/^[A-Za-z]{1,3}[0-9]+$/.test(n)) n = n + "_";
-        // Dedupe.
-        let final = n;
-        let i = 2;
-        while (usedNames.has(final)) {
-          final = `${n}_${i++}`;
+      // Resolve the numeric value and label of any token, in this doc's context.
+      const resolveToken = (tok, line) => {
+        let label = line.labels?.[tok.id] || null;
+        let value = null;
+        if (tok.kind === "num") {
+          value = tok.value;
+        } else if (tok.kind === "ref") {
+          const v = results[tok.sourceId]?.value;
+          value = v !== null && v !== undefined && !Number.isNaN(v) ? v : 0;
+          if (!label) {
+            const src = lines.find((l) => l.id === tok.sourceId);
+            label = src?.labels?.result || null;
+          }
+        } else if (tok.kind === "tokenref") {
+          const srcLine = lines.find((l) => l.id === tok.lineId);
+          const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
+          const v = srcTok && srcTok.kind === "num" ? srcTok.value : 0;
+          value = v;
+          if (!label) label = srcLine?.labels?.[tok.tokenId] || null;
+        } else if (tok.kind === "globalref") {
+          const g = globals.find((x) => x.id === tok.globalId);
+          value = g?.value ?? 0;
+          if (!label) label = g?.name || null;
         }
-        usedNames.add(final);
-        return final;
+        return { value, label };
       };
-      for (const g of globals) {
-        globalNameMap[g.id] = sanitizeName(g.name || "global");
-      }
 
-      // Build a single-cell formula string from a line's tokens.
-      // Returns null if the line is empty.
-      const buildFormula = (line) => {
-        if (!line.tokens || line.tokens.length === 0) return null;
-        const parts = [];
-        for (const tok of line.tokens) {
-          if (tok.kind === "num") {
-            parts.push(String(tok.value));
-          } else if (tok.kind === "op") {
-            parts.push(tok.value);
-          } else if (tok.kind === "paren") {
-            parts.push(tok.value);
-          } else if (tok.kind === "ref") {
-            // Reference to another line's result cell.
-            const r = lineRowByLineId[tok.sourceId];
-            if (r) parts.push(`$C$${r}`);
-            else {
-              // Source missing — fallback to literal value.
-              const v = results[tok.sourceId]?.value;
-              parts.push(String(v ?? 0));
-            }
-          } else if (tok.kind === "tokenref") {
-            // tokenref refers to a specific labeled num inside another line.
-            // Excel doesn't have per-token cells, so we use the token's literal
-            // value at export time.
-            const srcLine = lines.find((l) => l.id === tok.lineId);
-            const srcTok = srcLine?.tokens.find((t) => t.id === tok.tokenId);
-            const v = srcTok && srcTok.kind === "num" ? srcTok.value : 0;
-            parts.push(String(v));
-          } else if (tok.kind === "globalref") {
-            const name = globalNameMap[tok.globalId];
-            if (name) parts.push(name);
-            else {
-              const g = globals.find((x) => x.id === tok.globalId);
-              parts.push(String(g?.value ?? 0));
-            }
+      // Excel column letter from 0-indexed column number.
+      const colLetter = (n) => {
+        let s = "";
+        n = n + 1;
+        while (n > 0) {
+          const m = (n - 1) % 26;
+          s = String.fromCharCode(65 + m) + s;
+          n = Math.floor((n - 1) / 26);
+        }
+        return s;
+      };
+
+      // We build everything as cell objects keyed by A1 address, plus track
+      // !ref (used range) and !merges (merged ranges).
+      const cells = {};
+      const merges = [];
+      let maxCol = 0;
+      let curRow = 0; // 0-indexed for our own bookkeeping; convert to A1 with +1
+
+      const setCell = (r, c, cellObj) => {
+        const addr = colLetter(c) + (r + 1);
+        cells[addr] = cellObj;
+        if (c > maxCol) maxCol = c;
+      };
+
+      for (const line of lines) {
+        if (!line.tokens || line.tokens.length === 0) continue;
+
+        // Column 0 is reserved as a left margin / line-name column.
+        // Tokens start at column 1.
+        const tokenStartCol = 1;
+        // Compute where the result chip will go: after all tokens, after "=".
+        // We assign one cell per token (num/ref/globalref/tokenref/op/paren),
+        // then one cell for "=" then one cell for the result.
+        const tokenCount = line.tokens.length;
+        const eqCol = tokenStartCol + tokenCount;
+        const resultCol = eqCol + 1;
+
+        // Row 1: line name spanning columns tokenStartCol..resultCol
+        const nameRow = curRow;
+        const nameText = (line.name && line.name.trim())
+          ? line.name
+          : (line.labels?.result || "");
+        if (nameText) {
+          setCell(nameRow, tokenStartCol, {
+            t: "s",
+            v: nameText,
+            s: { font: { bold: true, sz: 13 } },
+          });
+          if (resultCol > tokenStartCol) {
+            merges.push({
+              s: { r: nameRow, c: tokenStartCol },
+              e: { r: nameRow, c: resultCol },
+            });
           }
         }
-        return "=" + parts.join("");
-      };
 
-      // Build "Cálculo" sheet as array-of-arrays.
-      const calcRows = [headerRow];
-      const calcFormulas = []; // track which rows have formulas to set them via cell objects below
-      for (const line of lines) {
-        const label = (line.labels?.result || line.name || "").trim();
-        const formula = buildFormula(line);
-        const r = results[line.id];
-        const computed = r && r.value !== null && r.value !== undefined ? r.value : null;
-        calcRows.push([label, "", computed]);
-        calcFormulas.push(formula);
-      }
-      const wsCalc = XLSX.utils.aoa_to_sheet(calcRows);
+        // Row 2: per-token labels.
+        const labelRow = curRow + 1;
+        line.tokens.forEach((tok, idx) => {
+          const c = tokenStartCol + idx;
+          if (tok.kind === "op" || tok.kind === "paren") {
+            // No label for operators / parens.
+            return;
+          }
+          const { label } = resolveToken(tok, line);
+          if (label) {
+            setCell(labelRow, c, {
+              t: "s",
+              v: label,
+              s: { font: { italic: true, sz: 10, color: { rgb: "888888" } } },
+            });
+          }
+        });
+        // Label for the result chip itself goes in the result column.
+        const resultLabel = line.labels?.result;
+        if (resultLabel) {
+          setCell(labelRow, resultCol, {
+            t: "s",
+            v: resultLabel,
+            s: { font: { italic: true, sz: 10, color: { rgb: "888888" } } },
+          });
+        }
 
-      // Apply formulas to column B (and let Excel recompute column C if we leave
-      // it pointing at the formula too — but we already wrote a precomputed value).
-      // For the formula column we use a cell object with `f` set; for the result
-      // column we ALSO write a formula `=B{n}` so it stays in sync if the user
-      // edits column B in Excel.
-      lines.forEach((line, idx) => {
-        const rowExcel = idx + 2;
-        const formula = calcFormulas[idx];
-        if (!formula) return;
-        // Column B (index 1)
-        const cellB = XLSX.utils.encode_cell({ r: rowExcel - 1, c: 1 });
-        wsCalc[cellB] = { t: "s", v: formula.slice(1), f: formula.slice(1) };
-        // Column C (index 2): formula referencing column B.
-        const cellC = XLSX.utils.encode_cell({ r: rowExcel - 1, c: 2 });
+        // Row 3: values + operators + "=" + live formula in result.
+        const valueRow = curRow + 2;
+        const valueCellAddrs = []; // addresses of numeric token cells, used to build the formula
+        line.tokens.forEach((tok, idx) => {
+          const c = tokenStartCol + idx;
+          if (tok.kind === "op") {
+            const display = tok.value === "*" ? "×" : tok.value === "/" ? "÷" : tok.value === "-" ? "−" : tok.value;
+            setCell(valueRow, c, {
+              t: "s",
+              v: display,
+              s: { alignment: { horizontal: "center" }, font: { color: { rgb: "888888" } } },
+            });
+            valueCellAddrs.push({ kind: "op", value: tok.value });
+          } else if (tok.kind === "paren") {
+            setCell(valueRow, c, {
+              t: "s",
+              v: tok.value,
+              s: { alignment: { horizontal: "center" }, font: { color: { rgb: "888888" } } },
+            });
+            valueCellAddrs.push({ kind: "paren", value: tok.value });
+          } else {
+            const { value } = resolveToken(tok, line);
+            setCell(valueRow, c, { t: "n", v: value });
+            valueCellAddrs.push({ kind: "num", addr: colLetter(c) + (valueRow + 1) });
+          }
+        });
+        // "=" cell
+        setCell(valueRow, eqCol, {
+          t: "s",
+          v: "=",
+          s: { alignment: { horizontal: "center" }, font: { color: { rgb: "888888" } } },
+        });
+        // Live formula in result cell, built from the value-cell addresses.
+        // Operators stay as-is, parens stay, num cells become their address.
+        const formulaParts = valueCellAddrs.map((p) => {
+          if (p.kind === "op") return p.value;
+          if (p.kind === "paren") return p.value;
+          return p.addr;
+        });
+        const formulaStr = formulaParts.join("");
         const r = results[line.id];
         const computed = r && r.value !== null && r.value !== undefined ? r.value : 0;
-        // We use =B{row} so column C re-evaluates whenever B changes.
-        wsCalc[cellC] = { t: "n", v: computed, f: `B${rowExcel}` };
-      });
+        setCell(valueRow, resultCol, {
+          t: "n",
+          v: computed,
+          f: formulaStr,
+          s: { font: { bold: true, color: { rgb: "778D1C" } } },
+        });
 
-      // Column widths
-      wsCalc["!cols"] = [
-        { wch: 22 }, // Etiqueta
-        { wch: 36 }, // Fórmula
-        { wch: 16 }, // Resultado
-      ];
-
-      // Build "Globales" sheet (only if any global is referenced or there are any).
-      const globalsUsedIds = new Set();
-      for (const line of lines) {
-        for (const tok of line.tokens) {
-          if (tok.kind === "globalref") globalsUsedIds.add(tok.globalId);
-        }
+        // Advance: 3 rows used + 1 separator row.
+        curRow += 4;
       }
-      const numberGlobals = globals.filter((g) => g.kind !== "line");
-      const globalsToInclude = numberGlobals.filter((g) => globalsUsedIds.has(g.id));
+
+      if (Object.keys(cells).length === 0) {
+        showToast("Nada que exportar");
+        return;
+      }
+
+      // Build worksheet object.
+      const ws = {};
+      Object.assign(ws, cells);
+      // !ref must cover the full used range.
+      ws["!ref"] = `A1:${colLetter(maxCol)}${curRow}`;
+      if (merges.length) ws["!merges"] = merges;
+      // Reasonable column widths.
+      const cols = [];
+      for (let c = 0; c <= maxCol; c++) {
+        cols.push({ wch: c === 0 ? 4 : 14 });
+      }
+      ws["!cols"] = cols;
 
       const wb = XLSX.utils.book_new();
-      // Add "Globales" first so its rows exist when we create defined names for them.
-      let wsGlob = null;
-      if (globalsToInclude.length > 0) {
-        const globRows = [["Nombre", "Valor"]];
-        for (const g of globalsToInclude) {
-          globRows.push([g.name, g.value]);
-        }
-        wsGlob = XLSX.utils.aoa_to_sheet(globRows);
-        wsGlob["!cols"] = [{ wch: 22 }, { wch: 16 }];
-        XLSX.utils.book_append_sheet(wb, wsGlob, "Globales");
-      }
+      XLSX.utils.book_append_sheet(wb, ws, "Cálculo");
 
-      XLSX.utils.book_append_sheet(wb, wsCalc, "Cálculo");
-
-      // Defined names: each global → workbook-level name pointing at its value cell
-      // in the Globales sheet.
-      if (wsGlob && globalsToInclude.length > 0) {
-        wb.Workbook = wb.Workbook || {};
-        wb.Workbook.Names = wb.Workbook.Names || [];
-        globalsToInclude.forEach((g, idx) => {
-          const row = idx + 2; // +1 for header, +1 because rows are 1-indexed
-          const name = globalNameMap[g.id];
-          wb.Workbook.Names.push({
-            Name: name,
-            Ref: `Globales!$B$${row}`,
-          });
-        });
-      }
-
-      // Generate file as ArrayBuffer for sharing/downloading.
+      // Generate .xlsx as ArrayBuffer.
       const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
       const blob = new Blob([wbout], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -4993,7 +5026,6 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
       const filename = `${safeName}.xlsx`;
       const file = new File([blob], filename, { type: blob.type });
 
-      // Web Share API first.
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         try {
           await navigator.share({
@@ -5005,7 +5037,6 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
           if (e && e.name === "AbortError") return;
         }
       }
-      // Fallback: download.
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -5021,16 +5052,19 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
     }
   };
 
-  // Capture the clean view as a PNG. Renders a hidden offscreen div with the
-  // doc contents (no selection, no keypad), rasterizes it via html-to-image,
-  // then shares it (Web Share API) or downloads as fallback.
+  // Capture the clean view as a PNG. Renders an offscreen div with the doc
+  // contents, rasterizes it via html-to-image, then shares it (Web Share API)
+  // or downloads as fallback.
+  // iOS Safari workarounds applied:
+  //   - Wait for fonts.ready and an extra frame so layout settles.
+  //   - Call toPng twice — first call "warms up" the renderer, second is the
+  //     real capture. This is a known Safari/html-to-image fix for blank PNGs.
   const handleScreenshot = async () => {
-    // Show the hidden capture node first.
     setCapturing(true);
-    // Wait two frames for the DOM to mount and fonts to settle.
+    // Wait several frames + fonts so the offscreen DOM is fully painted.
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await new Promise((r) => setTimeout(r, 100));
     try {
-      // Wait for fonts so the captured image uses Roboto Mono and not a fallback.
       if (document.fonts && document.fonts.ready) {
         try { await document.fonts.ready; } catch (e) {}
       }
@@ -5041,19 +5075,35 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
         return;
       }
       const mod = await import("html-to-image");
-      const dataUrl = await mod.toPng(node, {
+      const opts = {
         pixelRatio: 2,
         backgroundColor: isDark ? "#0f1115" : "#ffffff",
         cacheBust: true,
-      });
-      // Convert dataUrl → Blob → File for sharing.
-      const res = await fetch(dataUrl);
+      };
+      // Warm-up call — discarded. Forces Safari to pre-rasterize the node so
+      // the second call returns a populated image instead of an empty canvas.
+      try { await mod.toPng(node, opts); } catch (e) {}
+      // Small extra wait to let any async image/font fetches finish.
+      await new Promise((r) => setTimeout(r, 60));
+      const dataUrl = await mod.toPng(node, opts);
+      // Sanity check: a "blank" iOS render is often <1KB. If we got that,
+      // try one more time before giving up.
+      let finalDataUrl = dataUrl;
+      if (typeof dataUrl === "string" && dataUrl.length < 2000) {
+        await new Promise((r) => setTimeout(r, 100));
+        try {
+          const retry = await mod.toPng(node, opts);
+          if (typeof retry === "string" && retry.length > finalDataUrl.length) {
+            finalDataUrl = retry;
+          }
+        } catch (e) {}
+      }
+      const res = await fetch(finalDataUrl);
       const blob = await res.blob();
       const safeName = (doc.name || "calcu").replace(/[^a-z0-9_\-]+/gi, "_").slice(0, 40) || "calcu";
       const filename = `${safeName}.png`;
       const file = new File([blob], filename, { type: "image/png" });
 
-      // Try Web Share API first (iOS Safari, Android Chrome).
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         try {
           await navigator.share({
@@ -5063,14 +5113,12 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
           setCapturing(false);
           return;
         } catch (e) {
-          // User cancelled or share failed → fall through to download.
           if (e && e.name === "AbortError") {
             setCapturing(false);
             return;
           }
         }
       }
-      // Fallback: trigger a download.
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -5292,10 +5340,17 @@ const CaptureView = React.forwardRef(function CaptureView(
     <div
       ref={ref}
       style={{
+        // Positioned within the viewport but hidden via opacity. iOS Safari
+        // refuses to rasterize nodes positioned far offscreen (left:-9999),
+        // so we keep the node on-screen, layered over everything but
+        // non-interactive and invisible to the user.
         position: "fixed",
-        left: -9999,
+        left: 0,
         top: 0,
         width: 720,
+        opacity: 0,
+        pointerEvents: "none",
+        zIndex: -1,
         background: bg,
         padding: "32px 36px",
         fontFamily: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
