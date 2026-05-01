@@ -1033,6 +1033,7 @@ function DocsList({
       <div
         style={{
           padding: "18px 18px 12px",
+          paddingTop: "calc(env(safe-area-inset-top) + 18px)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -2706,6 +2707,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           background: theme.toolbar,
           gap: 6,
           flexDirection: theme.leftHanded ? "row-reverse" : "row",
+          paddingTop: "calc(env(safe-area-inset-top) + 8px)",
           transition: "background 0.25s, border-color 0.25s",
         }}
       >
@@ -4054,6 +4056,7 @@ function Keypad({
         background: t.keypadBg || "#EBEBEB",
         display: "flex",
         flexDirection: t.leftHanded ? "row-reverse" : "row",
+        paddingBottom: "env(safe-area-inset-bottom)",
         fontFamily: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         transition: "background 0.25s",
       }}
@@ -4641,6 +4644,7 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
         background: t.keypadBg || "#EBEBEB",
         display: "flex",
         flexDirection: t.leftHanded ? "row-reverse" : "row",
+        paddingBottom: "env(safe-area-inset-bottom)",
         fontFamily: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         height: 285,
       }}
@@ -5297,6 +5301,7 @@ function VariablesPanel({
         background: t.keypadBg || "#EBEBEB",
         display: "flex",
         flexDirection: t.leftHanded ? "row-reverse" : "row",
+        paddingBottom: "env(safe-area-inset-bottom)",
         fontFamily: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         transition: "background 0.25s",
         height: 285,
