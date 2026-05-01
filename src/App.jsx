@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, useLayoutEffect } from "react";
-import { Settings, Share, Undo2, Tag, Calculator as CalculatorIcon, Sun, Moon, Copy, ClipboardPaste, FileText, Plus, X, FolderOpen, Trash2, ChevronLeft, Lock, Globe2, Search, Check, Eye, EyeOff, Pencil, SquareX, Delete } from "lucide-react";
+import { Gear, Share, ArrowUUpLeft, Tag, Calculator as CalculatorIcon, Sun, Moon, Copy, ClipboardText, FileText, Files, Plus, X, FolderOpen, Trash, CaretLeft, Lock, Globe, MagnifyingGlass, Check, Eye, EyeSlash, PencilSimple, XSquare, Backspace } from "@phosphor-icons/react";
 
 /**
  * CALCU — canvas calculator.
@@ -831,6 +831,58 @@ export default function App() {
     setDocs(fixed);
   };
 
+  // Duplicate a doc: clone all lines/tokens with fresh ids, keep ref relations
+  // valid by remapping ids together. Resulting copy lives in the same folder.
+  const duplicateDoc = async (id) => {
+    const original = docs.find((d) => d.id === id);
+    if (!original) return;
+    // Build id map for line ids so refs to other lines stay valid in the copy.
+    const lineIdMap = {};
+    (original.lines || []).forEach((l) => { lineIdMap[l.id] = uid(); });
+    const tokenIdMap = {};
+    (original.lines || []).forEach((l) => {
+      (l.tokens || []).forEach((t) => { tokenIdMap[t.id] = uid(); });
+    });
+    const newLines = (original.lines || []).map((l) => {
+      const newLineId = lineIdMap[l.id];
+      const newTokens = (l.tokens || []).map((t) => {
+        const newId = tokenIdMap[t.id];
+        if (t.kind === "ref") {
+          // Remap source line id; if pointing outside this doc, keep as-is.
+          return { ...t, id: newId, sourceId: lineIdMap[t.sourceId] || t.sourceId };
+        }
+        if (t.kind === "tokenref") {
+          return {
+            ...t,
+            id: newId,
+            lineId: lineIdMap[t.lineId] || t.lineId,
+            tokenId: tokenIdMap[t.tokenId] || t.tokenId,
+          };
+        }
+        return { ...t, id: newId };
+      });
+      // Remap label keys (token ids) since tokens have new ids now.
+      const newLabels = {};
+      Object.entries(l.labels || {}).forEach(([key, val]) => {
+        if (key === "result") newLabels.result = val;
+        else if (tokenIdMap[key]) newLabels[tokenIdMap[key]] = val;
+      });
+      return { ...l, id: newLineId, tokens: newTokens, labels: newLabels };
+    });
+    const copy = {
+      id: uid(),
+      name: `${original.name || "Sin título"} (copia)`,
+      folderId: original.folderId || DEFAULT_FOLDER_ID,
+      lines: newLines,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await saveDoc(copy);
+    const list = await listDocs();
+    const fixed = list.map((d) => d.folderId ? d : { ...d, folderId: DEFAULT_FOLDER_ID });
+    setDocs(fixed);
+  };
+
   // Folder CRUD
   const createFolder = async (name) => {
     const f = makeFolder(name);
@@ -905,6 +957,7 @@ export default function App() {
         onOpen={openDoc}
         onNew={newDoc}
         onDelete={removeDoc}
+        onDuplicate={duplicateDoc}
         onOpenGlobals={() => setView("globals")}
         onOpenFormulas={() => setView("formulas")}
         globalsCount={globals.length}
@@ -964,7 +1017,7 @@ export default function App() {
 
 // ----------------------- Documents list screen -----------------------
 function DocsList({
-  docs, onOpen, onNew, onDelete, onOpenGlobals, onOpenFormulas,
+  docs, onOpen, onNew, onDelete, onDuplicate, onOpenGlobals, onOpenFormulas,
   globalsCount, formulasCount, folders, activeFolderId, onSelectFolder,
   onCreateFolder, onRenameFolder, onDeleteFolder, onMoveDoc,
   darkMode, setDarkMode,
@@ -1069,11 +1122,11 @@ function DocsList({
         }}
       >
         <SectionBtn active darkMode={darkMode}>
-          <CalcuLogo size={16} darkMode={darkMode} mini />
+          <CalculatorIcon size={14} weight="bold" />
           <span>cálculos</span>
         </SectionBtn>
         <SectionBtn onClick={onOpenGlobals} darkMode={darkMode}>
-          <Lock size={14} strokeWidth={1.8} />
+          <Lock size={14} weight="bold" />
           <span>Globales</span>
           {globalsCount > 0 && <span style={{ opacity: 0.6 }}>· {globalsCount}</span>}
         </SectionBtn>
@@ -1092,7 +1145,7 @@ function DocsList({
             flexShrink: 0,
           }}
         >
-          {darkMode ? <Moon size={16} style={{ color: "#ffffff" }} /> : <Sun size={16} style={{ color: "#ffffff" }} />}
+          {darkMode ? <Moon size={16} weight="bold" style={{ color: "#ffffff" }} /> : <Sun size={16} weight="bold" style={{ color: "#ffffff" }} />}
         </button>
       </div>
 
@@ -1164,7 +1217,7 @@ function DocsList({
                     display: "inline-flex", alignItems: "center", justifyContent: "center",
                   }}
                 >
-                  <Check size={12} strokeWidth={2.4} />
+                  <Check size={12} weight="bold" />
                 </button>
                 {f.id !== "folder-general" && (
                   <button
@@ -1183,7 +1236,7 @@ function DocsList({
                       display: "inline-flex", alignItems: "center", gap: 3, justifyContent: "center",
                     }}
                   >
-                    <Trash2 size={12} strokeWidth={1.8} />
+                    <Trash size={12} weight="bold" />
                     {isConfirmingDel && <span>borrar</span>}
                   </button>
                 )}
@@ -1247,7 +1300,7 @@ function DocsList({
                   setCreatingFolder(false);
                 }
               }}
-              placeholder="nueva carpeta"
+              placeholder="carpeta"
               style={{
                 background: "transparent",
                 border: "none",
@@ -1273,7 +1326,7 @@ function DocsList({
                 display: "inline-flex", alignItems: "center", justifyContent: "center",
               }}
             >
-              <Check size={12} strokeWidth={2.4} />
+              <Check size={12} weight="bold" />
             </button>
             <button
               onClick={() => { setNewFolderName(""); setCreatingFolder(false); }}
@@ -1303,7 +1356,7 @@ function DocsList({
             aria-label="Nueva carpeta"
             title="Nueva carpeta"
           >
-            <Plus size={16} strokeWidth={1.8} />
+            <Plus size={16} weight="bold" />
           </button>
         )}
       </div>
@@ -1352,6 +1405,25 @@ function DocsList({
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                if (onDuplicate) onDuplicate(doc.id);
+              }}
+              style={{
+                background: "transparent",
+                border: "none",
+                padding: 8,
+                marginLeft: 4,
+                cursor: "pointer",
+                color: t.muted,
+                borderRadius: 8,
+              }}
+              aria-label="Duplicar cálculo"
+              title="Duplicar"
+            >
+              <Files size={16} weight="bold" />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
                 setMoveDocId(doc.id);
               }}
               style={{
@@ -1366,7 +1438,7 @@ function DocsList({
               aria-label="Mover a otra carpeta"
               title="Mover"
             >
-              <FolderOpen size={16} strokeWidth={1.8} />
+              <FolderOpen size={16} weight="bold" />
             </button>
             <button
               onClick={(e) => {
@@ -1389,7 +1461,7 @@ function DocsList({
                 transition: "all 0.15s",
               }}
             >
-              <Trash2 size={16} strokeWidth={1.8} />
+              <Trash size={16} weight="bold" />
               {confirmDeleteId === doc.id && <span>borrar</span>}
             </button>
           </div>
@@ -1441,9 +1513,9 @@ function DocsList({
                     display: "flex", alignItems: "center", gap: 8,
                   }}
                 >
-                  <FolderOpen size={14} strokeWidth={1.8} />
+                  <FolderOpen size={14} weight="bold" />
                   <span style={{ flex: 1 }}>{f.name}</span>
-                  {isCurrent && <Check size={14} strokeWidth={2.2} />}
+                  {isCurrent && <Check size={14} weight="bold" />}
                 </button>
               );
             })}
@@ -1482,7 +1554,7 @@ function DocsList({
         }}
         aria-label="Nuevo cálculo"
       >
-        <Plus size={26} strokeWidth={1.8} />
+        <Plus size={26} weight="bold" />
       </button>
     </div>
   );
@@ -2415,7 +2487,14 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
       displayLabel = line.labels?.[selection.target] || null;
       if (tok.kind === "num") {
         displayValue = fmt(tok.value);
-        setClipboard({ kind: "num", value: tok.value });
+        // If this num has a label, it's an internal variable. Copy as a
+        // tokenref so the paste creates a live link instead of a literal.
+        const hasLabel = !!(line.labels && line.labels[selection.target]);
+        if (hasLabel) {
+          setClipboard({ kind: "tokenref", lineId: selection.lineId, tokenId: selection.target });
+        } else {
+          setClipboard({ kind: "num", value: tok.value });
+        }
       } else if (tok.kind === "ref") {
         const r = results[tok.sourceId];
         if (r && r.value !== null && r.value !== undefined) displayValue = fmt(r.value);
@@ -2805,7 +2884,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           style={{ background: "transparent", border: "none", padding: 6, cursor: "pointer" }}
           aria-label="Volver"
         >
-          <ChevronLeft size={22} style={{ color: theme.accentOnWhite }} strokeWidth={1.8} />
+          <CaretLeft size={22} style={{ color: theme.accentOnWhite }} weight="bold" />
         </button>
         {/* Settings (opens popup with dark mode etc) */}
         <button
@@ -2816,7 +2895,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           style={{ background: "transparent", border: "none", padding: 6, cursor: "pointer" }}
           aria-label="Configuración"
         >
-          <Settings size={22} style={{ color: theme.accentOnWhite }} strokeWidth={1.8} />
+          <Gear size={22} style={{ color: theme.accentOnWhite }} weight="bold" />
         </button>
 
         {/* Document name input — fills the center */}
@@ -2861,10 +2940,10 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           style={{ background: "transparent", border: "none", padding: 6, cursor: "pointer" }}
           aria-label="Deshacer"
         >
-          <Undo2
+          <ArrowUUpLeft
             size={22}
             style={{ color: history.length ? theme.accentOnWhite : theme.textFaint }}
-            strokeWidth={1.8}
+            weight="bold"
           />
         </button>
         <button
@@ -2877,9 +2956,9 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           title={keypadHidden ? "Mostrar teclado" : "Ocultar teclado"}
         >
           {keypadHidden ? (
-            <EyeOff size={22} style={{ color: theme.accentOnWhite }} strokeWidth={1.8} />
+            <EyeSlash size={22} style={{ color: theme.accentOnWhite }} weight="bold" />
           ) : (
-            <Eye size={22} style={{ color: theme.accentOnWhite }} strokeWidth={1.8} />
+            <Eye size={22} style={{ color: theme.accentOnWhite }} weight="bold" />
           )}
         </button>
       </div>
@@ -3975,7 +4054,7 @@ function TokenView({
       >
         <Lock
           size={12}
-          strokeWidth={1.8}
+          weight="bold"
           style={{ marginRight: 1, opacity: lifted || isSelected ? 1 : 0.7 }}
         />
         {v !== null && v !== undefined ? fmt(v) : "—"}
@@ -4230,13 +4309,13 @@ function Keypad({
         }}
       >
         <SideBtn onClick={stop(onNewLine)} title="Nueva línea" highlight theme={t}>
-          <CalculatorIcon size={18} style={{ color: t.accent || "#ADD010" }} />
+          <CalculatorIcon size={18} weight="bold" style={{ color: t.accentOnWhite || "#778D1C" }} />
         </SideBtn>
         <SideBtn onClick={stop(() => onSwitchToVars && onSwitchToVars())} title="Variables" theme={t}>
-          <Tag size={17} strokeWidth={1.8} style={{ color: t.textMuted || "#888" }} />
+          <Tag size={17} weight="bold" style={{ color: t.textMuted || "#888" }} />
         </SideBtn>
         <SideBtn onClick={stop(() => onSwitchToShare && onSwitchToShare())} title="Compartir" theme={t}>
-          <Share size={17} strokeWidth={1.8} style={{ color: t.textMuted || "#888" }} />
+          <Share size={17} weight="bold" style={{ color: t.textMuted || "#888" }} />
         </SideBtn>
       </div>
 
@@ -4244,10 +4323,10 @@ function Keypad({
       <div style={{ flex: 1, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 1, paddingLeft: 8 }}>
         {/* top row */}
         <TopBtn onClick={stop(onClear)} theme={t}>
-          <SquareX size={24} strokeWidth={1.5} />
+          <XSquare size={24} weight="bold" />
         </TopBtn>
         <TopBtn onClick={stop(onBackspace)} theme={t}>
-          <Delete size={24} strokeWidth={1.5} />
+          <Backspace size={24} weight="bold" />
         </TopBtn>
         <TopBtn onClick={stop(() => onParen("("))} theme={t}>(</TopBtn>
         <TopBtn onClick={stop(() => onParen(")"))} theme={t}>)</TopBtn>
@@ -4324,6 +4403,9 @@ function TopBtn({ children, onClick, disabled, theme }) {
         fontFamily: "inherit",
         fontWeight: 300,
         cursor: disabled ? "default" : "pointer",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
         transition: "background 0.2s, color 0.2s",
       }}
     >
@@ -4477,7 +4559,7 @@ function SelectionBar({ selection, lines, results, clipboard, onCopy, onPaste, o
           aria-label="Copiar línea"
           title="Copiar línea"
         >
-          <Copy size={20} strokeWidth={1.8} />
+          <Copy size={20} weight="bold" />
         </button>
         <button
           onClick={(e) => { e.stopPropagation(); if (canPaste && onPaste) onPaste(); }}
@@ -4486,7 +4568,7 @@ function SelectionBar({ selection, lines, results, clipboard, onCopy, onPaste, o
           aria-label="Pegar"
           title="Pegar"
         >
-          <ClipboardPaste size={20} strokeWidth={1.8} />
+          <ClipboardText size={20} weight="bold" />
         </button>
       </div>
     );
@@ -4527,7 +4609,7 @@ function SelectionBar({ selection, lines, results, clipboard, onCopy, onPaste, o
           aria-label={canPromote ? "Convertir en variable global" : "Etiqueta"}
           title={canPromote ? "Tocar candado: convertir en variable global" : ""}
         >
-          {canPromote ? <Lock size={15} strokeWidth={1.8} /> : <Tag size={16} strokeWidth={1.8} />}
+          {canPromote ? <Lock size={15} weight="bold" /> : <Tag size={16} weight="bold" />}
         </button>
         <input
           value={label || ""}
@@ -4618,7 +4700,7 @@ function SelectionBar({ selection, lines, results, clipboard, onCopy, onPaste, o
         }}
         aria-label="Copiar"
       >
-        <Copy size={20} strokeWidth={1.8} />
+        <Copy size={20} weight="bold" />
       </button>
       <button
         onClick={(e) => {
@@ -4636,7 +4718,7 @@ function SelectionBar({ selection, lines, results, clipboard, onCopy, onPaste, o
         }}
         aria-label="Pegar"
       >
-        <ClipboardPaste size={20} strokeWidth={1.8} />
+        <ClipboardText size={20} weight="bold" />
       </button>
     </div>
   );
@@ -4653,6 +4735,7 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
   const t = theme || {};
   const accent = t.accent || "#ADD010";
   const isDark = !!darkMode;
+  const accentOnWhite = isDark ? accent : "#778D1C";
   const [toast, setToast] = useState(null);
   const showToast = (msg) => {
     setToast(msg);
@@ -4830,13 +4913,13 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
         }}
       >
         <SideBtn onClick={(e) => { e.stopPropagation(); onSwitchToNumpad(); }} title="Volver al teclado" theme={t}>
-          <CalculatorIcon size={18} style={{ color: t.textMuted || "#888" }} />
+          <CalculatorIcon size={18} weight="bold" style={{ color: t.textMuted || "#888" }} />
         </SideBtn>
         <SideBtn onClick={(e) => { e.stopPropagation(); onSwitchToVars && onSwitchToVars(); }} title="Variables" theme={t}>
-          <Tag size={17} strokeWidth={1.8} style={{ color: t.textMuted || "#888" }} />
+          <Tag size={17} weight="bold" style={{ color: t.textMuted || "#888" }} />
         </SideBtn>
         <SideBtn disabled theme={t} highlight>
-          <Share size={17} strokeWidth={1.8} style={{ color: accent }} />
+          <Share size={17} weight="bold" style={{ color: accentOnWhite }} />
         </SideBtn>
       </div>
 
@@ -4864,7 +4947,7 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
         </div>
 
         <ShareBtn onClick={handleExportPDF} theme={t} accent={accent}>
-          <FileText size={18} strokeWidth={1.8} style={{ color: accent }} />
+          <FileText size={18} weight="bold" style={{ color: accent }} />
           <div>
             <div style={{ fontSize: 14, fontWeight: 500 }}>Exportar como PDF</div>
             <div style={{ fontSize: 11, color: t.textMuted || "#888", marginTop: 2 }}>
@@ -4887,7 +4970,7 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
         </ShareBtn>
 
         <ShareBtn onClick={handleCopyText} theme={t} accent={accent}>
-          <Copy size={18} strokeWidth={1.8} style={{ color: accent }} />
+          <Copy size={18} weight="bold" style={{ color: accent }} />
           <div>
             <div style={{ fontSize: 14, fontWeight: 500 }}>Copiar como texto</div>
             <div style={{ fontSize: 11, color: t.textMuted || "#888", marginTop: 2 }}>
@@ -4926,8 +5009,8 @@ function ShareBtn({ children, onClick, theme, accent }) {
     <button
       onClick={onClick}
       style={{
-        background: t.tokenBg || "#fff",
-        border: `1px solid ${t.tokenBorder || "#e5e5e5"}`,
+        background: t.keyBg || "#fff",
+        border: `1px solid ${t.keypadBorder || t.tokenBorder || "#e5e5e5"}`,
         borderRadius: 10,
         padding: "8px 12px",
         cursor: "pointer",
@@ -5012,7 +5095,7 @@ function SettingsPopup({ settings, updateSetting, onClose, theme, darkMode }) {
             justifySelf: "start",
           }}
         >
-          {subView && <ChevronLeft size={20} strokeWidth={1.8} />}
+          {subView && <CaretLeft size={20} weight="bold" />}
           {subView && <span>Atrás</span>}
         </button>
         <div style={{ fontSize: 16, fontWeight: 500, color: text, textAlign: "center" }}>
@@ -5088,7 +5171,15 @@ function SettingsRoot({ settings, updateSetting, openSubView, theme }) {
 
       {/* Group 2: toggles */}
       <SettingsGroup theme={theme}>
-        <SettingsRow theme={theme} label="Tema oscuro">
+        <SettingsRow
+          theme={theme}
+          label={
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              {settings.darkMode ? <Moon size={16} weight="bold" /> : <Sun size={16} weight="bold" />}
+              <span>Tema oscuro</span>
+            </span>
+          }
+        >
           <Toggle
             value={settings.darkMode}
             onChange={(v) => updateSetting("darkMode", v)}
@@ -5206,10 +5297,10 @@ function SettingsText({ settings, updateSetting, theme }) {
 
       <SettingsGroup theme={theme} title="Peso">
         <SettingsRow theme={theme} label="Regular" onClick={() => updateSetting("textWeight", "regular")}>
-          {settings.textWeight === "regular" && <Check size={16} strokeWidth={1.8} style={{ color: theme.accent }} />}
+          {settings.textWeight === "regular" && <Check size={16} weight="bold" style={{ color: theme.accent }} />}
         </SettingsRow>
         <SettingsRow theme={theme} label="Negrita" onClick={() => updateSetting("textWeight", "bold")} last>
-          {settings.textWeight === "bold" && <Check size={16} strokeWidth={1.8} style={{ color: theme.accent }} />}
+          {settings.textWeight === "bold" && <Check size={16} weight="bold" style={{ color: theme.accent }} />}
         </SettingsRow>
       </SettingsGroup>
       <div style={{ height: 40 }} />
@@ -5494,13 +5585,13 @@ function VariablesPanel({
         }}
       >
         <SideBtn onClick={(e) => { e.stopPropagation(); onSwitchToNumpad(); }} title="Volver al teclado" theme={t}>
-          <CalculatorIcon size={18} style={{ color: t.textMuted || "#888" }} />
+          <CalculatorIcon size={18} weight="bold" style={{ color: t.textMuted || "#888" }} />
         </SideBtn>
         <SideBtn disabled theme={t} highlight>
-          <Tag size={17} strokeWidth={1.8} style={{ color: accent }} />
+          <Tag size={17} weight="bold" style={{ color: accentOnWhite }} />
         </SideBtn>
         <SideBtn onClick={(e) => { e.stopPropagation(); onSwitchToShare && onSwitchToShare(); }} title="Compartir" theme={t}>
-          <Share size={17} strokeWidth={1.8} style={{ color: t.textMuted || "#888" }} />
+          <Share size={17} weight="bold" style={{ color: t.textMuted || "#888" }} />
         </SideBtn>
       </div>
 
@@ -5516,12 +5607,12 @@ function VariablesPanel({
           }}
         >
           <TabBtn active={tab === "internas"} onClick={() => setTab("internas")} theme={t}>
-            <Tag size={14} strokeWidth={1.8} />
+            <Tag size={14} weight="bold" />
             <span>Internas</span>
             <span style={{ opacity: 0.5, fontSize: 12 }}>· {internalVars.length}</span>
           </TabBtn>
           <TabBtn active={tab === "globales"} onClick={() => setTab("globales")} theme={t}>
-            <Lock size={14} strokeWidth={1.8} />
+            <Lock size={14} weight="bold" />
             <span>Globales</span>
             <span style={{ opacity: 0.5, fontSize: 12 }}>· {globals.length}</span>
           </TabBtn>
@@ -5568,7 +5659,7 @@ function VariablesPanel({
                 }}
                 aria-label="Crear variable global"
               >
-                <Plus size={16} strokeWidth={1.8} />
+                <Plus size={16} weight="bold" />
               </button>
               <input
                 value={newName}
@@ -5648,7 +5739,7 @@ function VariablesPanel({
                     <line x1="3" y1="12" x2="13" y2="12" />
                   </svg>
                 ) : (
-                  <Tag size={14} strokeWidth={1.8} style={{ color: accentOnWhite, flexShrink: 0 }} />
+                  <Tag size={14} weight="bold" style={{ color: accentOnWhite, flexShrink: 0 }} />
                 )}
                 <span style={{ flex: 1, fontSize: 15, color: accentOnWhite, fontWeight: isActive ? 500 : 400 }}>{v.name}</span>
                 <span style={{ fontSize: 15, color: t.text || "#1a1a1a", fontVariantNumeric: "lining-nums tabular-nums" }}>
@@ -5674,7 +5765,7 @@ function VariablesPanel({
                     aria-label={`Editar "${v.name}"`}
                     title="Editar"
                   >
-                    <Pencil size={14} strokeWidth={1.8} />
+                    <PencilSimple size={14} weight="bold" />
                   </button>
                   {openMenuKey === `internal:${v.lineId}:${v.tokenId}` && (
                     <div
@@ -5706,7 +5797,7 @@ function VariablesPanel({
                           textAlign: "left", borderRadius: 6,
                         }}
                       >
-                        <Lock size={14} strokeWidth={1.8} />
+                        <Lock size={14} weight="bold" />
                         <span>Promover a global</span>
                       </button>
                       <button
@@ -5723,7 +5814,7 @@ function VariablesPanel({
                           textAlign: "left", borderRadius: 6,
                         }}
                       >
-                        <Trash2 size={14} strokeWidth={1.8} />
+                        <Trash size={14} weight="bold" />
                         <span>Borrar</span>
                       </button>
                     </div>
@@ -5811,7 +5902,7 @@ function VariablesPanel({
                       }}
                       aria-label="Guardar"
                     >
-                      <Check size={14} strokeWidth={1.8} />
+                      <Check size={14} weight="bold" />
                     </button>
                     <button
                       onClick={(e) => {
@@ -5834,7 +5925,7 @@ function VariablesPanel({
                       }}
                       aria-label={confirmDeleteId === g.id ? "Confirmar eliminar" : "Eliminar"}
                     >
-                      <Trash2 size={14} strokeWidth={1.8} />
+                      <Trash size={14} weight="bold" />
                       {confirmDeleteId === g.id && <span>borrar</span>}
                     </button>
                   </>
@@ -5844,7 +5935,7 @@ function VariablesPanel({
                       onClick={(e) => { e.stopPropagation(); onPickGlobal(g.id); }}
                       style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}
                     >
-                      <Lock size={12} strokeWidth={1.8} style={{ color: accentOnWhite }} />
+                      <Lock size={12} weight="bold" style={{ color: accentOnWhite }} />
                       <span style={{ fontSize: 15, color: accentOnWhite }}>{g.name}</span>
                     </div>
                     <span
@@ -5874,7 +5965,7 @@ function VariablesPanel({
                       }}
                       aria-label="Editar"
                     >
-                      <Pencil size={14} strokeWidth={1.8} />
+                      <PencilSimple size={14} weight="bold" />
                     </button>
                   </>
                 )}
@@ -5928,7 +6019,7 @@ function VariablesPanel({
                     aria-label={`Editar "${g.name}"`}
                     title="Editar"
                   >
-                    <Pencil size={14} strokeWidth={1.8} />
+                    <PencilSimple size={14} weight="bold" />
                   </button>
                   {openMenuKey === `globalLine:${g.id}` && (
                     <div
@@ -5963,7 +6054,7 @@ function VariablesPanel({
                           textAlign: "left", borderRadius: 6,
                         }}
                       >
-                        <Pencil size={14} strokeWidth={1.8} />
+                        <PencilSimple size={14} weight="bold" />
                         <span>Renombrar</span>
                       </button>
                       <button
@@ -5980,7 +6071,7 @@ function VariablesPanel({
                           textAlign: "left", borderRadius: 6,
                         }}
                       >
-                        <Trash2 size={14} strokeWidth={1.8} />
+                        <Trash size={14} weight="bold" />
                         <span>Borrar</span>
                       </button>
                     </div>
@@ -6011,7 +6102,7 @@ function VariablesPanel({
               padding: "6px 10px",
             }}
           >
-            <Search size={14} strokeWidth={1.8} style={{ color: t.textMuted || "#888", flexShrink: 0 }} />
+            <MagnifyingGlass size={14} weight="bold" style={{ color: t.textMuted || "#888", flexShrink: 0 }} />
             <input
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
@@ -6049,7 +6140,7 @@ function VariablesPanel({
                 }}
                 aria-label="Limpiar búsqueda"
               >
-                <X size={14} strokeWidth={1.8} />
+                <X size={14} weight="bold" />
               </button>
             )}
           </div>
@@ -6174,7 +6265,7 @@ function FormulaRow({
             }}
             aria-label="Guardar nombre"
           >
-            <Check size={13} strokeWidth={1.8} />
+            <Check size={13} weight="bold" />
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); onCancelEdit(); }}
@@ -6236,7 +6327,7 @@ function FormulaRow({
             aria-label="Insertar fórmula"
             title="Insertar en la línea activa"
           >
-            <ClipboardPaste size={13} strokeWidth={1.8} />
+            <ClipboardText size={13} weight="bold" />
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); onStartEdit && onStartEdit(); }}
@@ -6251,7 +6342,7 @@ function FormulaRow({
             aria-label="Renombrar"
             title="Renombrar"
           >
-            <Settings size={14} strokeWidth={1.8} />
+            <Gear size={14} weight="bold" />
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); askDel(); }}
@@ -6272,7 +6363,7 @@ function FormulaRow({
             }}
             aria-label={confirmDel ? "Confirmar eliminar" : "Eliminar"}
           >
-            <Trash2 size={13} strokeWidth={1.8} />
+            <Trash size={13} weight="bold" />
             {confirmDel && <span>borrar</span>}
           </button>
         </>
@@ -6331,10 +6422,10 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
           onClick={onBack}
           style={{ background: "transparent", border: "none", padding: 4, cursor: "pointer" }}
         >
-          <ChevronLeft size={22} style={{ color: t.accentOnCard }} strokeWidth={1.8} />
+          <CaretLeft size={22} style={{ color: t.accentOnCard }} weight="bold" />
         </button>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
-          <Lock size={18} style={{ color: t.accentOnCard }} strokeWidth={1.8} />
+          <Lock size={18} style={{ color: t.accentOnCard }} weight="bold" />
           <div style={{ fontSize: 18, fontWeight: 400 }}>Variables globales</div>
         </div>
       </div>
@@ -6376,7 +6467,7 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
               flexShrink: 0,
             }}
           >
-            <Plus size={18} strokeWidth={1.8} />
+            <Plus size={18} weight="bold" />
           </button>
           <input
             value={newName}
@@ -6450,7 +6541,7 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
               >
                 {isEditing ? (
                   <>
-                    <Lock size={14} strokeWidth={1.8} style={{ color: t.accentOnCard, flexShrink: 0 }} />
+                    <Lock size={14} weight="bold" style={{ color: t.accentOnCard, flexShrink: 0 }} />
                     <input
                       value={editName}
                       onChange={(e) => setEditName(e.target.value)}
@@ -6505,7 +6596,7 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
                         cursor: "pointer",
                       }}
                     >
-                      <Check size={16} strokeWidth={1.8} />
+                      <Check size={16} weight="bold" />
                     </button>
                     <button
                       onClick={() => askDelete(g.id)}
@@ -6524,13 +6615,13 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
                         transition: "all 0.15s",
                       }}
                     >
-                      <Trash2 size={16} strokeWidth={1.8} />
+                      <Trash size={16} weight="bold" />
                       {confirmDeleteId === g.id && <span>borrar</span>}
                     </button>
                   </>
                 ) : (
                   <>
-                    <Lock size={14} strokeWidth={1.8} style={{ color: t.accentOnCard, flexShrink: 0 }} />
+                    <Lock size={14} weight="bold" style={{ color: t.accentOnCard, flexShrink: 0 }} />
                     <span style={{ flex: 1, fontSize: 16, color: t.accentOnCard }}>{g.name}</span>
                     <span
                       style={{
@@ -6555,7 +6646,7 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
                         padding: 4,
                       }}
                     >
-                      <Pencil size={16} strokeWidth={1.8} />
+                      <PencilSimple size={16} weight="bold" />
                     </button>
                   </>
                 )}
@@ -6620,7 +6711,7 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
                           display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
                         }}
                       >
-                        <Check size={14} strokeWidth={1.8} />
+                        <Check size={14} weight="bold" />
                       </button>
                       <button
                         onClick={() => setEditingId(null)}
@@ -6649,7 +6740,7 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
                           flexShrink: 0,
                         }}
                       >
-                        <Trash2 size={13} strokeWidth={1.8} />
+                        <Trash size={13} weight="bold" />
                         {confirmDeleteId === g.id && <span>borrar</span>}
                       </button>
                     </>
@@ -6677,7 +6768,7 @@ function GlobalsManager({ globals, onSave, onDelete, onBack, darkMode }) {
                         }}
                         title="Renombrar"
                       >
-                        <Pencil size={16} strokeWidth={1.8} />
+                        <PencilSimple size={16} weight="bold" />
                       </button>
                     </>
                   )}
@@ -6747,7 +6838,7 @@ function FormulasManager({ formulas, globals, onUpsert, onDelete, onBack, darkMo
             fontSize: 16,
           }}
         >
-          <ChevronLeft size={20} strokeWidth={1.8} />
+          <CaretLeft size={20} weight="bold" />
           <span>Atrás</span>
         </button>
         <div style={{ flex: 1, textAlign: "center", fontSize: 16, fontWeight: 500 }}>
@@ -6836,7 +6927,7 @@ function FormulasManager({ formulas, globals, onUpsert, onDelete, onBack, darkMo
                       display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
                     }}
                   >
-                    <Check size={14} strokeWidth={1.8} />
+                    <Check size={14} weight="bold" />
                   </button>
                   <button
                     onClick={() => setEditingId(null)}
@@ -6893,7 +6984,7 @@ function FormulasManager({ formulas, globals, onUpsert, onDelete, onBack, darkMo
                     }}
                     aria-label="Renombrar"
                   >
-                    <Pencil size={16} strokeWidth={1.8} />
+                    <PencilSimple size={16} weight="bold" />
                   </button>
                   <button
                     onClick={() => askDelete(f.id)}
@@ -6913,7 +7004,7 @@ function FormulasManager({ formulas, globals, onUpsert, onDelete, onBack, darkMo
                       transition: "all 0.15s",
                     }}
                   >
-                    <Trash2 size={16} strokeWidth={1.8} />
+                    <Trash size={16} weight="bold" />
                     {confirmDeleteId === f.id && <span>borrar</span>}
                   </button>
                 </>
