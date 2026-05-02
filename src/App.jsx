@@ -4872,9 +4872,8 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
       };
 
       // We build everything as cell objects keyed by A1 address, plus track
-      // !ref (used range) and !merges (merged ranges).
+      // !ref (used range).
       const cells = {};
-      const merges = [];
       let maxCol = 0;
       let curRow = 0; // 0-indexed for our own bookkeeping; convert to A1 with +1
 
@@ -4897,27 +4896,20 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
         const eqCol = tokenStartCol + tokenCount;
         const resultCol = eqCol + 1;
 
-        // Row 1: line name spanning columns tokenStartCol..resultCol
-        const nameRow = curRow;
-        const nameText = (line.name && line.name.trim())
-          ? line.name
-          : (line.labels?.result || "");
-        if (nameText) {
-          setCell(nameRow, tokenStartCol, {
+        // Row 1 (optional): line name. We only emit this row when the line has
+        // an explicit line.name. labels.result is rendered separately below the
+        // result chip — using it here too would duplicate the label.
+        const nameText = (line.name && line.name.trim()) ? line.name : "";
+        const hasName = !!nameText;
+        if (hasName) {
+          setCell(curRow, tokenStartCol, {
             t: "s",
             v: nameText,
-            s: { font: { bold: true, sz: 13 } },
           });
-          if (resultCol > tokenStartCol) {
-            merges.push({
-              s: { r: nameRow, c: tokenStartCol },
-              e: { r: nameRow, c: resultCol },
-            });
-          }
         }
 
-        // Row 2: per-token labels.
-        const labelRow = curRow + 1;
+        // Row N: per-token labels.
+        const labelRow = curRow + (hasName ? 1 : 0);
         line.tokens.forEach((tok, idx) => {
           const c = tokenStartCol + idx;
           if (tok.kind === "op" || tok.kind === "paren") {
@@ -4929,7 +4921,6 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
             setCell(labelRow, c, {
               t: "s",
               v: label,
-              s: { font: { italic: true, sz: 10, color: { rgb: "888888" } } },
             });
           }
         });
@@ -4939,12 +4930,11 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
           setCell(labelRow, resultCol, {
             t: "s",
             v: resultLabel,
-            s: { font: { italic: true, sz: 10, color: { rgb: "888888" } } },
           });
         }
 
-        // Row 3: values + operators + "=" + live formula in result.
-        const valueRow = curRow + 2;
+        // Row N+1: values + operators + "=" + live formula in result.
+        const valueRow = labelRow + 1;
         const valueCellAddrs = []; // addresses of numeric token cells, used to build the formula
         line.tokens.forEach((tok, idx) => {
           const c = tokenStartCol + idx;
@@ -4953,14 +4943,12 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
             setCell(valueRow, c, {
               t: "s",
               v: display,
-              s: { alignment: { horizontal: "center" }, font: { color: { rgb: "888888" } } },
             });
             valueCellAddrs.push({ kind: "op", value: tok.value });
           } else if (tok.kind === "paren") {
             setCell(valueRow, c, {
               t: "s",
               v: tok.value,
-              s: { alignment: { horizontal: "center" }, font: { color: { rgb: "888888" } } },
             });
             valueCellAddrs.push({ kind: "paren", value: tok.value });
           } else {
@@ -4973,7 +4961,6 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
         setCell(valueRow, eqCol, {
           t: "s",
           v: "=",
-          s: { alignment: { horizontal: "center" }, font: { color: { rgb: "888888" } } },
         });
         // Live formula in result cell, built from the value-cell addresses.
         // Operators stay as-is, parens stay, num cells become their address.
@@ -4989,11 +4976,10 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
           t: "n",
           v: computed,
           f: formulaStr,
-          s: { font: { bold: true, color: { rgb: "778D1C" } } },
         });
 
-        // Advance: 3 rows used + 1 separator row.
-        curRow += 4;
+        // Advance: rows used (name?+labels+values) + 1 separator row.
+        curRow = valueRow + 2;
       }
 
       if (Object.keys(cells).length === 0) {
@@ -5006,13 +4992,19 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
       Object.assign(ws, cells);
       // !ref must cover the full used range.
       ws["!ref"] = `A1:${colLetter(maxCol)}${curRow}`;
-      if (merges.length) ws["!merges"] = merges;
       // Reasonable column widths.
       const cols = [];
       for (let c = 0; c <= maxCol; c++) {
         cols.push({ wch: c === 0 ? 4 : 14 });
       }
       ws["!cols"] = cols;
+      // Force a fixed height for every row so Numbers/Excel doesn't
+      // auto-expand rows with cell styles to giant heights.
+      const rowsHeights = [];
+      for (let r = 0; r < curRow; r++) {
+        rowsHeights.push({ hpt: 18 });
+      }
+      ws["!rows"] = rowsHeights;
 
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Cálculo");
@@ -5061,9 +5053,10 @@ function SharePanel({ doc, results, globals, internalVars, onSwitchToNumpad, onS
   //     real capture. This is a known Safari/html-to-image fix for blank PNGs.
   const handleScreenshot = async () => {
     setCapturing(true);
-    // Wait several frames + fonts so the offscreen DOM is fully painted.
+    // The capture overlay is rendered fully visible. Give the browser ample
+    // time to paint it before we rasterize.
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 250));
     try {
       if (document.fonts && document.fonts.ready) {
         try { await document.fonts.ready; } catch (e) {}
@@ -5340,19 +5333,21 @@ const CaptureView = React.forwardRef(function CaptureView(
     <div
       ref={ref}
       style={{
-        // Positioned within the viewport but hidden via opacity. iOS Safari
-        // refuses to rasterize nodes positioned far offscreen (left:-9999),
-        // so we keep the node on-screen, layered over everything but
-        // non-interactive and invisible to the user.
+        // Render fully visible on top of everything during capture. iOS Safari
+        // refuses to rasterize nodes that are offscreen or transparent, so
+        // for the brief moment we're capturing we let the user see this view.
+        // It unmounts the moment capture is done.
         position: "fixed",
         left: 0,
         top: 0,
-        width: 720,
-        opacity: 0,
-        pointerEvents: "none",
-        zIndex: -1,
+        right: 0,
+        bottom: 0,
+        width: "100%",
+        height: "100%",
+        overflowY: "auto",
+        zIndex: 9999,
         background: bg,
-        padding: "32px 36px",
+        padding: "32px 24px",
         fontFamily: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         color: text,
         boxSizing: "border-box",
