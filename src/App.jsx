@@ -1713,9 +1713,12 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         accentOnWhite: "#778D1C",
       };
 
-  // Text scale: 0..6 maps to 0.7x..1.6x. Default (3) = 1.0x.
-  const textScale = 0.7 + (settings.textScale ?? 3) * 0.15;
-  theme.textScale = textScale;
+  // Text scale: single source of truth — same formula as the settings preview.
+  const lineFontSize = 18 + ((settings.textScale ?? 3) - 3) * 4;
+  theme.lineFontSize = lineFontSize;
+  // Multiplier kept for back-compat with relative sizes (labels, placeholder).
+  // 18 is the default font size, so multiplier = lineFontSize / 18.
+  theme.textScale = lineFontSize / 18;
   theme.textWeight = settings.textWeight === "bold" ? 500 : 300;
   theme.leftHanded = !!settings.leftHanded;
 
@@ -3656,7 +3659,7 @@ function LineView({
       {line.name && line.name.trim() && (
         <div
           style={{
-            fontSize: 12 * (theme?.textScale ?? 1),
+            fontSize: (theme?.lineFontSize ?? 18) * 0.67,
             fontWeight: 700,
             color: lineColor,
             marginBottom: 2,
@@ -3672,7 +3675,7 @@ function LineView({
       <div
         className="flex items-center"
         style={{
-          fontSize: 30 * (theme?.textScale ?? 1),
+          fontSize: theme?.lineFontSize ?? 18,
           gap: 8,
           lineHeight: 1.3,
           fontWeight: theme?.textWeight ?? 300,
@@ -3687,7 +3690,7 @@ function LineView({
             style={{
               color: theme.textFaint,
               fontStyle: "italic",
-              fontSize: 18 * (theme?.textScale ?? 1),
+              fontSize: theme?.lineFontSize ?? 18,
             }}
           >
             toca un número…
@@ -3934,7 +3937,7 @@ function TokenView({
           onKeyDown={(e) => e.key === "Enter" && commitEditNumber()}
           onClick={(e) => e.stopPropagation()}
           style={{
-            fontSize: 30,
+            fontSize: theme?.lineFontSize ?? 18,
             fontFamily: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
             fontWeight: 300,
             width: Math.max(60, (editing.buffer?.length || 1) * 20),
