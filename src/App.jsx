@@ -12,7 +12,7 @@ import { Gear, Share, ArrowUUpLeft, Tag, Calculator as CalculatorIcon, Sun, Moon
  *
  * Interactions:
  *   - Tap a line to make it active (new input goes there).
- *   - Long-press any chip/number → menu with Copiar / Pegar / Etiqueta / Borrar.
+ *   - Long-press any chip/number → picks it up for drag (release in place selects it).
  *   - Drag a chip from one line onto another → creates linked token (purple).
  *   - Double-tap any number → inline edit.
  *   - Purple chip = linked reference; curved line connects it to source.
@@ -470,15 +470,15 @@ function getLineColor(lines, lineId, darkMode = false) {
 //   - Hold 250ms → chip is "picked up" (onPickUp); chip visually lifts
 //     * Then MOVE → drag (onDragMove continuously)
 //       * Release over a line → onDragEnd with coords
-//     * Then RELEASE without moving → open menu (onLongPress)
+//     * Then RELEASE without moving → onTap (select, same as quick tap)
 //
 // Touch listeners are non-passive so preventDefault works on iOS.
-function useChipGesture({ onTap, onLongPress, onPickUp, onDragMove, onDragEnd }) {
+function useChipGesture({ onTap, onPickUp, onDragMove, onDragEnd }) {
   const elRef = useRef(null);
   const handlersRef = useRef({});
   useEffect(() => {
-    handlersRef.current = { onTap, onLongPress, onPickUp, onDragMove, onDragEnd };
-  }, [onTap, onLongPress, onPickUp, onDragMove, onDragEnd]);
+    handlersRef.current = { onTap, onPickUp, onDragMove, onDragEnd };
+  }, [onTap, onPickUp, onDragMove, onDragEnd]);
 
   useEffect(() => {
     const el = elRef.current;
@@ -543,8 +543,11 @@ function useChipGesture({ onTap, onLongPress, onPickUp, onDragMove, onDragEnd })
           // Drop at release position.
           h.onDragEnd && h.onDragEnd(x, y);
         } else {
-          // Picked up but didn't move → open context menu.
-          h.onLongPress && h.onLongPress(el.getBoundingClientRect());
+          // Picked up but didn't move → cancel the drag (clears drag state,
+          // no new token because release is over the source line) and treat
+          // as a tap (select the chip).
+          h.onDragEnd && h.onDragEnd(x, y);
+          h.onTap && h.onTap();
         }
         return;
       }
@@ -581,9 +584,11 @@ function useChipGesture({ onTap, onLongPress, onPickUp, onDragMove, onDragEnd })
 
     el.addEventListener("mousedown", onMouseDown);
     el.addEventListener("touchstart", onTouchStart, { passive: false });
-    el.addEventListener("touchmove", onTouchMove, { passive: false });
-    el.addEventListener("touchend", onTouchEnd, { passive: false });
-    el.addEventListener("touchcancel", onTouchCancel, { passive: false });
+    // Global touch listeners so drag keeps tracking when the touch target
+    // shifts (iOS Safari loses the original target when the chip transforms).
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("touchend", onTouchEnd, { passive: false });
+    window.addEventListener("touchcancel", onTouchCancel, { passive: false });
     // Global mouse listeners so drag keeps tracking when cursor leaves the chip.
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
@@ -592,9 +597,9 @@ function useChipGesture({ onTap, onLongPress, onPickUp, onDragMove, onDragEnd })
       clearTimers();
       el.removeEventListener("mousedown", onMouseDown);
       el.removeEventListener("touchstart", onTouchStart);
-      el.removeEventListener("touchmove", onTouchMove);
-      el.removeEventListener("touchend", onTouchEnd);
-      el.removeEventListener("touchcancel", onTouchCancel);
+      window.removeEventListener("touchmove", onTouchMove);
+      window.removeEventListener("touchend", onTouchEnd);
+      window.removeEventListener("touchcancel", onTouchCancel);
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
     };
@@ -1623,7 +1628,6 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
     if (copyToastTimer.current) clearTimeout(copyToastTimer.current);
     copyToastTimer.current = setTimeout(() => _setCopyToast(null), 1800);
   };
-  const [menu, setMenu] = useState(null);
   const [editing, setEditing] = useState(null);
   const [history, setHistory] = useState([]);
   const [labelEditor, setLabelEditor] = useState(null);
@@ -1793,7 +1797,6 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
     });
     setSelection(null);
     setEditing(null);
-    setMenu(null);
   };
 
   const resolveGlobalValue = useCallback(
@@ -2308,20 +2311,8 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
     );
   };
 
-  // ---------- menu ----------
-  const onChipLongPress = (lineId, target, anchorRect) => {
-    setSelection({ lineId, target });
-    setMenu({
-      x: anchorRect.left + anchorRect.width / 2,
-      y: anchorRect.top - 10,
-    });
-    setActiveLineId(lineId);
-  };
-
-  const closeMenu = () => setMenu(null);
-
   const copySelection = () => {
-    if (!selection) return closeMenu();
+    if (!selection) return;
 
     // Helper to write a string to the OS clipboard (best-effort).
     const writeToOSClipboard = (text) => {
@@ -2354,7 +2345,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
     // human-readable rendering on the OS clipboard.
     if (selection.kind === "line") {
       const line = lines.find((l) => l.id === selection.lineId);
-      if (!line || !line.tokens || line.tokens.length === 0) return closeMenu();
+      if (!line || !line.tokens || line.tokens.length === 0) return;
       const resolvedTokens = line.tokens.map((tk) => {
         if (tk.kind === "ref") {
           const v = results[tk.sourceId]?.value;
@@ -2429,7 +2420,6 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
       } catch (e) {}
 
       setCopyToast(osText ? "línea copiada" : "copiada");
-      closeMenu();
       return;
     }
 
@@ -2440,7 +2430,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         // Line global — copy its tokens into the line-tokens clipboard so it
         // can be pasted as a new line via the paste button. Build OS clipboard
         // text using the same formatting as line copy.
-        if (!g.tokens || g.tokens.length === 0) return closeMenu();
+        if (!g.tokens || g.tokens.length === 0) return;
         const resolvedTokens = g.tokens.map((tk) => ({ ...tk, id: uid() }));
         setClipboard({ kind: "line-tokens", tokens: resolvedTokens, labels: {} });
 
@@ -2464,7 +2454,6 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           writeToOSClipboard(osText);
         } catch (e) {}
         setCopyToast("línea copiada");
-        closeMenu();
         return;
       }
       if (g) {
@@ -2483,7 +2472,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
     } else {
       const line = lines.find((l) => l.id === selection.lineId);
       const tok = line?.tokens.find((t) => t.id === selection.target);
-      if (!tok) return closeMenu();
+      if (!tok) return;
       displayLabel = line.labels?.[selection.target] || null;
       if (tok.kind === "num") {
         displayValue = fmt(tok.value);
@@ -2523,12 +2512,10 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
       writeToOSClipboard(osText);
       setCopyToast("copiado");
     }
-
-    closeMenu();
   };
 
   const pasteClipboard = () => {
-    if (!clipboard || !activeLineId) return closeMenu();
+    if (!clipboard || !activeLineId) return;
 
     // Pasting a copied whole line — insert as a NEW line below the active one.
     if (clipboard.kind === "line-tokens") {
@@ -2547,7 +2534,6 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         return next;
       });
       setActiveLineId(newLine.id);
-      closeMenu();
       return;
     }
 
@@ -2570,14 +2556,12 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         return { ...lf, tokens: [...lf.tokens, newTok] };
       })
     );
-    closeMenu();
   };
 
   const deleteSelection = () => {
-    if (!selection) return closeMenu();
+    if (!selection) return;
     if (selection.kind === "global") {
       // Don't allow deleting globals from inside calculator selection — use globals manager.
-      closeMenu();
       return;
     }
     if (selection.target === "result") {
@@ -2593,16 +2577,14 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
       );
     }
     setSelection(null);
-    closeMenu();
   };
 
   const openLabelEditor = () => {
     // Target a specific token (or the result chip) based on selection.
     const lineId = selection?.lineId || activeLineId;
     const target = selection?.target || "result";
-    if (!lineId) return closeMenu();
+    if (!lineId) return;
     setLabelEditor({ lineId, target });
-    closeMenu();
   };
 
   const saveLabel = (text) => {
@@ -2751,6 +2733,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         })
       );
       setActiveLineId(targetLineId);
+      setSelection({ lineId: targetLineId, target: newTok.id });
     } else if (!targetLineId) {
       // Drop in empty canvas area → check if it's within the canvas and create a new line.
       let inCanvas = false;
@@ -2767,6 +2750,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         const newLine = { id: uid(), tokens: [newTok], labels: {} };
         mutateLines((prev) => [...prev, newLine]);
         setActiveLineId(newLine.id);
+        setSelection({ lineId: newLine.id, target: newTok.id });
       }
     }
     setDrag(null);
@@ -2783,6 +2767,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             toKey: `${line.id}:${tok.id}`,
             id: `${line.id}-${tok.id}`,
             sourceLineId: tok.sourceId,
+            sourceTokenId: "result",
             targetLineId: line.id,
             targetTokenId: tok.id,
           });
@@ -2792,6 +2777,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             toKey: `${line.id}:${tok.id}`,
             id: `${line.id}-${tok.id}`,
             sourceLineId: tok.lineId,
+            sourceTokenId: tok.tokenId,
             targetLineId: line.id,
             targetTokenId: tok.id,
           });
@@ -2858,7 +2844,6 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           setTimeout(() => newId && setActiveLineId(newId), 0);
           return;
         }
-        closeMenu();
         setSelection(null);
         if (editing) commitEditNumber();
       }}
@@ -2981,18 +2966,34 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             // - If selected target is a result → show all arrows feeding from this line.
             // - If selected token is a labeled internal value → show arrows it feeds (forward).
             let visible = false;
-            if (selection && selection.kind !== "global") {
+            if (selection && selection.kind !== "global" && selection.kind !== "line") {
+              // FORWARD: selected chip is the SOURCE of this connection.
               if (
-                selection.target === "result" &&
-                c.sourceLineId === selection.lineId
+                c.sourceLineId === selection.lineId &&
+                c.sourceTokenId === selection.target
               ) {
                 visible = true;
               }
-              // Selected token IS the ref destination → show its incoming arrow.
+              // BACKWARD: selected chip is the DESTINATION of this connection.
               if (
-                selection.target !== "result" &&
                 c.targetLineId === selection.lineId &&
                 c.targetTokenId === selection.target
+              ) {
+                visible = true;
+              }
+            }
+            if (drag) {
+              // FORWARD: dragged chip is the SOURCE of this connection.
+              if (
+                c.sourceLineId === drag.sourceLineId &&
+                c.sourceTokenId === drag.sourceTarget
+              ) {
+                visible = true;
+              }
+              // BACKWARD: dragged chip is the DESTINATION of this connection.
+              if (
+                c.targetLineId === drag.sourceLineId &&
+                c.targetTokenId === drag.sourceTarget
               ) {
                 visible = true;
               }
@@ -3015,6 +3016,26 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
               </g>
             );
           })}
+          {drag && (() => {
+            const fromKey = `${drag.sourceLineId}:${drag.sourceTarget}`;
+            const from = chipPositions[fromKey];
+            if (!from) return null;
+            const canvasRect = canvasRef.current?.getBoundingClientRect();
+            if (!canvasRect) return null;
+            // drag.x/y are viewport coords; convert to canvas-relative.
+            const toX = drag.x - canvasRect.left;
+            const toY = drag.y - canvasRect.top;
+            const fromY = from.by;
+            const cp1y = fromY + Math.abs(toY - fromY) * 0.5;
+            const cp2y = toY - Math.abs(toY - fromY) * 0.5;
+            const path = `M ${from.x} ${fromY} C ${from.x} ${cp1y}, ${toX} ${cp2y}, ${toX} ${toY}`;
+            const c = drag.color || "#ADD010";
+            return (
+              <g key="drag-arrow">
+                <path d={path} stroke={c} strokeWidth="1.6" fill="none" opacity="0.7" strokeDasharray="4 3" />
+              </g>
+            );
+          })()}
         </svg>
 
         {lines.map((line) => (
@@ -3025,6 +3046,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
             isActive={activeLineId === line.id}
             selection={selection}
             editing={editing}
+            drag={drag}
             setActiveLine={() => {
               if (suppressNextRootClick.current) {
                 suppressNextRootClick.current = false;
@@ -3039,7 +3061,6 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
                 setSelection(null);
               }
             }}
-            onChipLongPress={onChipLongPress}
             onChipPickUp={onChipPickUp}
             onChipDragMove={onChipDragMove}
             onChipDragEnd={onChipDragEnd}
@@ -3111,18 +3132,6 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
         >
           {drag.text}
         </div>
-      )}
-
-      {menu && (
-        <ChipMenu
-          x={menu.x}
-          y={menu.y}
-          onCopy={copySelection}
-          onPaste={pasteClipboard}
-          onDelete={deleteSelection}
-          onLabel={openLabelEditor}
-          canPaste={!!clipboard}
-        />
       )}
 
       {labelEditor && (
@@ -3595,8 +3604,8 @@ function LineView({
   isActive,
   selection,
   editing,
+  drag,
   setActiveLine,
-  onChipLongPress,
   onChipPickUp,
   onChipDragMove,
   onChipDragEnd,
@@ -3731,7 +3740,7 @@ function LineView({
                 lineId={line.id}
                 selection={selection}
                 editing={editing}
-                onLongPress={onChipLongPress}
+                drag={drag}
                 onPickUp={onChipPickUp}
                 onDragMove={onChipDragMove}
                 onDragEnd={onChipDragEnd}
@@ -3784,7 +3793,7 @@ function LineView({
                 lineId={line.id}
                 value={result.value}
                 selected={isLineSelected}
-                onLongPress={onChipLongPress}
+                drag={drag}
                 onPickUp={onChipPickUp}
                 onDragMove={onChipDragMove}
                 onDragEnd={onChipDragEnd}
@@ -3855,7 +3864,7 @@ function TokenView({
   lineId,
   selection,
   editing,
-  onLongPress,
+  drag,
   onPickUp,
   onDragMove,
   onDragEnd,
@@ -3872,19 +3881,15 @@ function TokenView({
 }) {
   const isSelected = selection && selection.lineId === lineId && selection.target === tok.id;
   const isNumOrRef = tok.kind === "num" || tok.kind === "ref" || tok.kind === "globalref" || tok.kind === "tokenref";
-  const [lifted, setLifted] = useState(false);
+  const lifted = !!(drag && drag.sourceLineId === lineId && drag.sourceTarget === tok.id);
   const t = theme || {};
   const accent = t.accent || "#ADD010";
 
   const gestureRef = useChipGesture({
     onTap: isNumOrRef ? () => onTap(lineId, tok.id) : null,
-    onLongPress: isNumOrRef ? (rect) => { setLifted(false); onLongPress(lineId, tok.id, rect); } : null,
-    onPickUp: isNumOrRef ? (x, y) => {
-      setLifted(true);
-      onPickUp(lineId, tok.id, x, y);
-    } : null,
+    onPickUp: isNumOrRef ? (x, y) => onPickUp(lineId, tok.id, x, y) : null,
     onDragMove: isNumOrRef ? (x, y) => onDragMove(x, y) : null,
-    onDragEnd: isNumOrRef ? (x, y) => { setLifted(false); onDragEnd(x, y); } : null,
+    onDragEnd: isNumOrRef ? (x, y) => onDragEnd(x, y) : null,
   });
 
   const setEl = (el) => {
@@ -4065,16 +4070,15 @@ function TokenView({
 }
 
 // ----------------------- result chip -----------------------
-function ResultChip({ lineId, value, selected, onLongPress, onPickUp, onDragMove, onDragEnd, onTap, chipRefs, color }) {
+function ResultChip({ lineId, value, selected, drag, onPickUp, onDragMove, onDragEnd, onTap, chipRefs, color }) {
   const c = color || "#ADD010";
-  const [lifted, setLifted] = useState(false);
+  const lifted = !!(drag && drag.sourceLineId === lineId && drag.sourceTarget === "result");
 
   const gestureRef = useChipGesture({
     onTap: () => onTap && onTap(lineId),
-    onLongPress: (rect) => { setLifted(false); onLongPress(lineId, "result", rect); },
-    onPickUp: (x, y) => { setLifted(true); onPickUp(lineId, "result", x, y); },
+    onPickUp: (x, y) => onPickUp(lineId, "result", x, y),
     onDragMove: (x, y) => onDragMove(x, y),
-    onDragEnd: (x, y) => { setLifted(false); onDragEnd(x, y); },
+    onDragEnd: (x, y) => onDragEnd(x, y),
   });
 
   const setEl = (el) => {
@@ -4109,52 +4113,6 @@ function ResultChip({ lineId, value, selected, onLongPress, onPickUp, onDragMove
     >
       {fmt(value)}
     </span>
-  );
-}
-
-// ----------------------- menu -----------------------
-function ChipMenu({ x, y, onCopy, onPaste, onDelete, onLabel, canPaste }) {
-  return (
-    <div
-      onClick={(e) => e.stopPropagation()}
-      style={{
-        position: "fixed",
-        left: x,
-        top: y,
-        transform: "translate(-50%, -100%)",
-        background: "#2a2a2a",
-        borderRadius: 12,
-        boxShadow: "0 10px 40px rgba(0,0,0,0.25)",
-        display: "flex",
-        overflow: "hidden",
-        zIndex: 50,
-        fontFamily: '"Roboto Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-      }}
-    >
-      <MenuBtn onClick={onCopy}>Copiar</MenuBtn>
-      <MenuBtn onClick={onPaste} disabled={!canPaste}>Pegar</MenuBtn>
-      <MenuBtn onClick={onDelete} danger>Borrar</MenuBtn>
-    </div>
-  );
-}
-function MenuBtn({ children, onClick, disabled, danger }) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        padding: "11px 16px",
-        fontSize: 14,
-        border: "none",
-        background: "transparent",
-        color: disabled ? "#666" : danger ? "#ff7a88" : "#eee",
-        cursor: disabled ? "default" : "pointer",
-        fontFamily: "inherit",
-        letterSpacing: "0.01em",
-      }}
-    >
-      {children}
-    </button>
   );
 }
 
