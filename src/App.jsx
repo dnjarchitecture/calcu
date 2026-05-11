@@ -26,9 +26,8 @@ const OPS = {
   "*": (a, b) => a * b,
   "/": (a, b) => a / b,
   "^": (a, b) => Math.pow(a, b),
-  "%": (a, b) => a - Math.floor(a / b) * b,
 };
-const PREC = { "+": 1, "-": 1, "*": 2, "/": 2, "%": 2, "^": 4 };
+const PREC = { "+": 1, "-": 1, "*": 2, "/": 2, "^": 4 };
 const RIGHT = { "^": true };
 
 function evalTokens(tokens, resolveRef, resolveGlobal, resolveTokenRef) {
@@ -63,6 +62,12 @@ function evalTokens(tokens, resolveRef, resolveGlobal, resolveTokenRef) {
         if (!ops.length) return { value: null, error: "paréntesis" };
         ops.pop();
       } else if (t.kind === "op") {
+        // Postfix percentage: divides the top of the output stack by 100.
+        if (t.value === "%") {
+          if (!out.length) return { value: null, error: "operando" };
+          out[out.length - 1] = out[out.length - 1] / 100;
+          continue;
+        }
         while (
           ops.length &&
           ops[ops.length - 1].kind === "op" &&
@@ -2162,6 +2167,30 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
     );
   };
 
+  const insertPercent = () => {
+    const id = ensureActive();
+    mutateLines((prev) =>
+      prev.map((l) => {
+        if (l.id !== id) return l;
+        const lf = finalizeBuilding(l);
+        const last = lf.tokens[lf.tokens.length - 1];
+        if (!last) return lf;
+        const valueProducing =
+          last.kind === "num" ||
+          last.kind === "ref" ||
+          last.kind === "tokenref" ||
+          last.kind === "globalref" ||
+          (last.kind === "paren" && last.value === ")") ||
+          (last.kind === "op" && last.value === "%");
+        if (!valueProducing) return lf;
+        return {
+          ...lf,
+          tokens: [...lf.tokens, { id: uid(), kind: "op", value: "%" }],
+        };
+      })
+    );
+  };
+
   const insertParen = (p) => {
     const id = ensureActive();
     mutateLines((prev) =>
@@ -3588,7 +3617,7 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
           onSign={toggleSign}
           onParen={insertParen}
           onPower={() => insertOp("^")}
-          onPercent={() => insertOp("%")}
+          onPercent={insertPercent}
           onSwitchToVars={() => setKeypadMode("vars")}
           onSwitchToShare={() => setKeypadMode("share")}
           theme={theme}
