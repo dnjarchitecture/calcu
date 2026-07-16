@@ -618,6 +618,7 @@ export default function App() {
   const [view, setView] = useState("loading"); // "loading" | "list" | "calc" | "globals"
   const [docs, setDocs] = useState([]);
   const [currentDoc, setCurrentDoc] = useState(null);
+  const [currentDocIsNew, setCurrentDocIsNew] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [globals, setGlobals] = useState([]);
   const [formulas, setFormulas] = useState([]);
@@ -740,7 +741,11 @@ export default function App() {
       setFormulas(mergedGlobals.filter((g) => g.kind === "line"));
       setFolders(fl);
       setSettings(st);
-      setView("list");
+      // Launch straight into a blank calculator: the app should be usable as a
+      // calculator the moment it opens. The list is one tap back from here.
+      setCurrentDoc(makeDoc("Sin título", DEFAULT_FOLDER_ID));
+      setCurrentDocIsNew(true);
+      setView("calc");
     })();
     return () => { cancelled = true; };
   }, []);
@@ -819,11 +824,13 @@ export default function App() {
 
   const openDoc = (doc) => {
     setCurrentDoc(doc);
+    setCurrentDocIsNew(false);
     setView("calc");
   };
   const newDoc = () => {
     const d = makeDoc("Sin título", activeFolderId);
     setCurrentDoc(d);
+    setCurrentDocIsNew(true);
     setView("calc");
   };
   const backToList = async () => {
@@ -1010,6 +1017,7 @@ export default function App() {
   return (
     <Calculator
       doc={currentDoc}
+      isNew={currentDocIsNew}
       onBack={backToList}
       darkMode={darkMode}
       setDarkMode={setDarkMode}
@@ -1618,7 +1626,7 @@ function CalcuLogo({ size = 36, darkMode = false, mini = false }) {
 }
 
 // ----------------------- main calculator component -----------------------
-function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SETTINGS, updateSetting = () => {}, globals = [], onUpsertGlobal, onDeleteGlobal, formulas = [], onUpsertFormula = () => {}, onDeleteFormula = () => {} }) {
+function Calculator({ doc, isNew = false, onBack, darkMode, setDarkMode, settings = DEFAULT_SETTINGS, updateSetting = () => {}, globals = [], onUpsertGlobal, onDeleteGlobal, formulas = [], onUpsertFormula = () => {}, onDeleteFormula = () => {} }) {
   const [lines, setLines] = useState(() => doc?.lines && doc.lines.length ? doc.lines : [makeLine([])]);
   const [docName, setDocName] = useState(doc?.name || "Sin título");
   const [docId] = useState(doc?.id || uid());
@@ -1642,8 +1650,18 @@ function Calculator({ doc, onBack, darkMode, setDarkMode, settings = DEFAULT_SET
   const [keypadHidden, setKeypadHidden] = useState(false);
 
   // Auto-save document whenever lines or name change.
+  // A doc that was never saved and is still untouched stays out of storage, so
+  // opening the app (which lands on a blank calc) doesn't pile up empty docs.
+  // Once it has been written once, later edits always save — including clearing
+  // it back to empty.
+  const persisted = useRef(!isNew);
   useEffect(() => {
     const handle = setTimeout(() => {
+      if (!persisted.current) {
+        const untouched = docName === "Sin título" && lines.every((l) => !l.tokens?.length);
+        if (untouched) return;
+      }
+      persisted.current = true;
       saveDoc({
         id: docId,
         name: docName,
