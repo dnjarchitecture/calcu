@@ -750,6 +750,38 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // Reset to a blank calculator when the app is reopened after a long idle.
+  // As a PWA, locking the phone or switching apps only suspends the page: on
+  // resume React state is intact and the mount-time startup effect never runs
+  // again, so without this the app would sit on whatever calc was open. We treat
+  // coming back after >5 min away as a fresh session and drop the user onto a
+  // blank calc — the previous work is already saved and one tap back in the
+  // list. Quick switches (a call, checking a message) keep the current context.
+  // Only fires while in the calculator; if the user left from the list or an
+  // editor screen, we respect where they were.
+  const viewRef = useRef(view);
+  useEffect(() => { viewRef.current = view; });
+  useEffect(() => {
+    const IDLE_RESET_MS = 5 * 60 * 1000;
+    let hiddenAt = null;
+    const onVisibility = () => {
+      if (document.hidden) {
+        hiddenAt = Date.now();
+        return;
+      }
+      if (hiddenAt == null) return;
+      const away = Date.now() - hiddenAt;
+      hiddenAt = null;
+      if (away >= IDLE_RESET_MS && viewRef.current === "calc") {
+        setCurrentDoc(makeDoc("Sin título", DEFAULT_FOLDER_ID));
+        setCurrentDocIsNew(true);
+        setView("calc");
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
   const refreshGlobals = async () => {
     const gs = await listGlobals();
     setGlobals(gs);
@@ -1016,6 +1048,7 @@ export default function App() {
   }
   return (
     <Calculator
+      key={currentDoc?.id}
       doc={currentDoc}
       isNew={currentDocIsNew}
       onBack={backToList}
@@ -1655,23 +1688,49 @@ function Calculator({ doc, isNew = false, onBack, darkMode, setDarkMode, setting
   // Once it has been written once, later edits always save — including clearing
   // it back to empty.
   const persisted = useRef(!isNew);
+  // Latest values in refs so saveNow can run outside the debounce (e.g. when
+  // the phone locks) without re-subscribing its listener on every keystroke.
+  const linesRef = useRef(lines);
+  const docNameRef = useRef(docName);
   useEffect(() => {
-    const handle = setTimeout(() => {
-      if (!persisted.current) {
-        const untouched = docName === "Sin título" && lines.every((l) => !l.tokens?.length);
-        if (untouched) return;
-      }
-      persisted.current = true;
-      saveDoc({
-        id: docId,
-        name: docName,
-        lines,
-        updatedAt: Date.now(),
-        createdAt: doc?.createdAt || Date.now(),
-      });
-    }, 600);
+    linesRef.current = lines;
+    docNameRef.current = docName;
+  });
+  const saveNow = useCallback(() => {
+    const curLines = linesRef.current;
+    const curName = docNameRef.current;
+    if (!persisted.current) {
+      const untouched = curName === "Sin título" && curLines.every((l) => !l.tokens?.length);
+      if (untouched) return;
+    }
+    persisted.current = true;
+    saveDoc({
+      id: docId,
+      name: curName,
+      lines: curLines,
+      updatedAt: Date.now(),
+      createdAt: doc?.createdAt || Date.now(),
+    });
+  }, [docId, doc]);
+
+  useEffect(() => {
+    const handle = setTimeout(saveNow, 600);
     return () => clearTimeout(handle);
-  }, [lines, docName, docId, doc]);
+  }, [lines, docName, saveNow]);
+
+  // Flush the pending save when the page is hidden (phone lock, app switch) or
+  // torn down. iOS pauses JS timers while backgrounded, so the 600ms debounce
+  // may not have fired; without this a last-moment edit could be lost when the
+  // app is later reset to a blank calc on resume.
+  useEffect(() => {
+    const onHide = () => { if (document.hidden) saveNow(); };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", saveNow);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", saveNow);
+    };
+  }, [saveNow]);
 
   // Theme object — every component reads its colors from here.
   const theme = darkMode
